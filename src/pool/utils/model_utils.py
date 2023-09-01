@@ -1,24 +1,20 @@
-import torch.nn.functional as F
+import json
+import yaml
+import math
 import numpy as np
 import matplotlib.pyplot as plt
-from rbm_torch.utils.graph_utils import Sequence_logo, Sequence_logo_multiple, Sequence_logo_all
-import copy
-from multiprocessing import Pool
-import pandas as pd
-import types
-import json
-from torch.utils.data import Dataset
-from torch.optim import SGD, AdamW, Adagrad, Adadelta, Adam  # Supported Optimizers
-import math
+
 import torch
-import time
+from torch.optim import SGD, AdamW, Adagrad, Adadelta, Adam  # Supported Optimizers
+
+from pool.utils.graph_utils import sequence_logo, sequence_logo_multiple, sequence_logo_all
 
 
 def load_run(runfile):
     if type(runfile) is str:
         try:
             with open(runfile, "r") as f:
-                run_data = json.load(f)
+                run_data = yaml.safe_load(f)
         except IOError:
             print(f"Runfile {runfile} not found or empty! Please check!")
             exit(1)
@@ -27,6 +23,11 @@ def load_run(runfile):
     else:
         print("Unsupported Format for run configuration. Must be filename of json config file or dictionary")
         exit(1)
+
+    general_data = run_data['general']
+    dataset_data = run_data['dataset']
+
+
 
     config = run_data["config"]
 
@@ -298,7 +299,7 @@ def all_weights(model, name=None, rows=5, order_weights=True):
             ncols = 2
         else:
             ncols = 1
-        fig = Sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=ncols, figsize=(7, 5), ticks_every=10, ticks_labels_size=10, title_size=12, dpi=200, molecule=model.molecule)
+        fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=ncols, figsize=(7, 5), ticks_every=10, ticks_labels_size=10, title_size=12, dpi=200, molecule=model.molecule)
 
     plt.close() # close all open figures
 
@@ -309,4 +310,4 @@ def conv_weights(crbm, hidden_key, name, rows, columns, h, w, order_weights=True
         order = np.argsort(beta)[::-1]
     else:
         order = np.arange(0, beta.shape[0], 1)
-    fig = Sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=columns, figsize=(h,w) ,ticks_every=5,ticks_labels_size=10,title_size=12, dpi=200, molecule=crbm.molecule)
+    fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=columns, figsize=(h,w) ,ticks_every=5,ticks_labels_size=10,title_size=12, dpi=200, molecule=crbm.molecule)

@@ -1,24 +1,20 @@
 import time
-import pandas as pd
 import math
 import sys
-import json
 import numpy as np
-from pytorch_lightning import LightningModule, Trainer
-# from pytorch_lightning.profiler import SimpleProfiler, PyTorchProfiler
+from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
-from sklearn.model_selection import train_test_split
 
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import SGD, AdamW, Adagrad, Adadelta  # Supported Optimizers
-from multiprocessing import cpu_count # Just to set the worker number
 from torch.autograd import Variable
 
-from rbm_torch.utils.utils import Categorical, fasta_read, conv2d_dim  #Sequence_logo, gen_data_lowT, gen_data_zeroT, all_weights, Sequence_logo_all,
-from rbm_torch.models.base import Base_drelu
+from pool.dataset import Categorical
+from pool.utils.model_utils import conv2d_dim
+from pool.model import BaseRelu
+from pool.model import DataSampler
+
 # input_shape = (v_num, q)
 # Lists all possible convolutions that reproduce exactly the input shape
 # Useful for building a convolution topology
@@ -32,24 +28,24 @@ from rbm_torch.models.base import Base_drelu
  #    }
 
 
-class CRBM(Base_drelu):
+class CRBM(BaseRelu):
     def __init__(self, config, debug=False, precision="double", meminfo=False):
         super().__init__(config, debug=debug, precision=precision)
-        self.mc_moves = config['mc_moves']  # Number of MC samples to take to update hidden and visible configurations
 
-        self.sample_type = config['sample_type']
         assert self.sample_type in ['gibbs', 'pt', 'pcd']
 
+        self.sample_type = config['sample_type']
+        self.mc_moves = config['mc_moves']  # Number of MC samples to take to update hidden and visible configurations
         self.l1_2 = config['l1_2']  # regularization on weights, ex. 0.25
         self.lf = config['lf']  # regularization on fields, ex. 0.001
         self.ld = config['ld']
         self.lgap = config['lgap']
         self.lbs = config['lbs']  # regularization to promote using both sides of the weights
         self.lcorr = config['lcorr']  # regularization on correlation of weights
-        ###########################################
         self.lkd = config['lkd']
-
         self.convolution_topology = config["convolution_topology"]
+        ###########################################
+
 
         if type(self.v_num) is int:
             # Normal dist. times this value sets initial weight values

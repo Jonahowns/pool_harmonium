@@ -1,24 +1,19 @@
-import time
-import pandas as pd
+import os
 import math
 import json
 import sys
-import numpy as np
-from pytorch_lightning import LightningModule, LightningDataModule, Trainer
-# from pytorch_lightning.profiler import SimpleProfiler, PyTorchProfiler
-from pytorch_lightning.loggers import TensorBoardLogger
-from sklearn.model_selection import train_test_split, GroupShuffleSplit
-
-import os
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import SGD, AdamW, Adagrad, Adadelta  # Supported Optimizers
-from multiprocessing import cpu_count # Just to set the worker number
-from torch.autograd import Variable
+import pandas as pd
+import numpy as np
 
-from rbm_torch.utils.utils import Categorical, fasta_read, label_samples, process_weights, configure_optimizer, StratifiedBatchSampler, WeightedSubsetRandomSampler
+from pytorch_lightning import LightningModule
+from sklearn.model_selection import GroupShuffleSplit
+from multiprocessing import cpu_count  # Just to set the worker number
+
 from torch.utils.data import WeightedRandomSampler
+from pool.utils.model_utils import process_weights, configure_optimizer
+from pool.dataset import StratifiedBatchSampler, WeightedSubsetRandomSampler, Categorical, label_samples
+from pool.utils.io import fasta_read
 
 
 # class that takes care of generic methods for all models
@@ -55,7 +50,7 @@ class Base(LightningModule):
         assert self.validation_size < 1.0
         assert self.test_size < 1.0
 
-        self.molecule = config['molecule']  # can be protein, rna or dna currently
+        self.alphabet = config['alphabet']  # can be protein, rna or dna currently
 
         # Sequence Weighting
         # Not pretty but necessary to either provide the weights or to import from the fasta file
@@ -168,7 +163,7 @@ class Base(LightningModule):
                     threads = 1
                 else:
                     threads = self.worker_num
-                seqs, seq_read_counts, all_chars, q_data = fasta_read(file, self.molecule,
+                seqs, seq_read_counts, all_chars, q_data = fasta_read(file, self.alphabet,
                                                                       drop_duplicates=False, threads=threads)
             except IOError:
                 print(f"Provided Fasta File '{file}' Not Found")
@@ -262,7 +257,7 @@ class Base(LightningModule):
             training_weights = self.training_data["seq_count"].tolist()
 
         train_reader = Categorical(self.training_data, self.q, weights=training_weights, max_length=self.v_num,
-                                   molecule=self.molecule, device=self.device, one_hot=True)
+                                   alpahbet=self.alphabet, device=self.device, one_hot=True)
         # Init Fields
         if init_fields:
             if hasattr(self, "fields"):
@@ -290,7 +285,8 @@ class Base(LightningModule):
         elif self.sampling_strategy == "weighted":
             return torch.utils.data.DataLoader(
                 train_reader,
-                sampler=WeightedRandomSampler(weights=self.sampling_weights, num_samples=self.batch_size * self.sample_multiplier, replacement=True),
+                sampler=WeightedRandomSampler(weights=self.sampling_weights,
+                                              num_samples=self.batch_size * self.sample_multiplier, replacement=True),
                 num_workers=self.worker_num,  # Set to 0 if debug = True
                 batch_size=self.batch_size,
                 pin_memory=self.pin_mem
@@ -298,7 +294,8 @@ class Base(LightningModule):
         elif self.sampling_strategy == "stratified_weighted":
             return torch.utils.data.DataLoader(
                 train_reader,
-                batch_sampler=WeightedSubsetRandomSampler(self.sampling_weights, self.training_data["label"].to_numpy(), self.group_fraction, self.batch_size, self.sample_multiplier),
+                batch_sampler=WeightedSubsetRandomSampler(self.sampling_weights, self.training_data["label"].to_numpy(),
+                                                          self.group_fraction, self.batch_size, self.sample_multiplier),
                 num_workers=self.worker_num,
                 pin_memory=self.pin_mem
             )
@@ -319,12 +316,13 @@ class Base(LightningModule):
             validation_weights = self.validation_data["seq_count"].tolist()
 
         val_reader = Categorical(self.validation_data, self.q, weights=validation_weights, max_length=self.v_num,
-                                 molecule=self.molecule, device=self.device, one_hot=True, additional_data=None)
+                                 alpahbet=self.alphabet, device=self.device, one_hot=True, additional_data=None)
 
         if self.sampling_strategy == "stratified":
             return torch.utils.data.DataLoader(
                 val_reader,
-                batch_sampler=StratifiedBatchSampler(self.validation_data["label"].to_numpy(), batch_size=self.batch_size, shuffle=False),
+                batch_sampler=StratifiedBatchSampler(self.validation_data["label"].to_numpy(),
+                                                     batch_size=self.batch_size, shuffle=False),
                 num_workers=self.worker_num,  # Set to 0 if debug = True
                 pin_memory=self.pin_mem
             )
@@ -373,6 +371,8 @@ class Base(LightningModule):
 class BaseRelu(Base):
     def __init__(self, config, debug=False, precision="double"):
         super().__init__(config, debug=debug, precision=precision)
+
+        # dropout
         self.dr = 0.
         if "dr" in config.keys():
             self.dr = config["dr"]
@@ -390,16 +390,13 @@ class BaseRelu(Base):
     def get_param(self, param_name):
         try:
             tensor = getattr(self, param_name).clone()
-            return tensor.detach().numpy()
+            return tensor.cpu().detach().numpy()
         except KeyError:
             print(f"Key {param_name} not found")
             sys.exit(1)
 
-    # Initializes Members for both PT and gen_data functions
-
-
-    ## Hidden dReLU supporting Function
-    def erf_times_gauss(self, X):  # This is the "characteristic" function phi
+    def erf_times_gauss(self, X):
+        """This is the "characteristic" function phi, used for ReLU and dReLU"""
         m = torch.zeros_like(X, device=self.device)
         tmp1 = X < -6
         m[tmp1] = 2 * torch.exp(X[tmp1] ** 2 / 2)
@@ -415,6 +412,7 @@ class BaseRelu(Base):
 
     ## Hidden dReLU supporting Function
     def log_erf_times_gauss(self, X):
+        """Used in Cumulant Generating Function for ReLU and dReLU """
         m = torch.zeros_like(X, device=self.device)
         tmp = X < 4
         m[tmp] = 0.5 * X[tmp] ** 2 + torch.log(1 - torch.erf(X[tmp] / self.sqrt2)) + self.logsqrtpiover2

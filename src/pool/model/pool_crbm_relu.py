@@ -1,27 +1,21 @@
-import time
-import pandas as pd
 import math
-import json
 import numpy as np
 import sys
-from pytorch_lightning import LightningModule, Trainer
-# from pytorch_lightning.profiler import SimpleProfiler, PyTorchProfiler
-from pytorch_lightning.loggers import TensorBoardLogger
 
-
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import SGD, AdamW, Adagrad, Adadelta  # Supported Optimizers
-from multiprocessing import cpu_count # Just to set the worker number
+
 from torch.autograd import Variable
+from torch.utils.data import DataLoader
 
-from rbm_torch.utils.utils import Categorical, conv2d_dim
-from torch.utils.data import WeightedRandomSampler
-from rbm_torch.models.base import Base_drelu
+from pool.dataset import Categorical
+from pool.utils.model_utils import conv2d_dim
+from pool.model import BaseRelu
+from pool.model import DataSampler
 
-class pool_crbm_relu(Base_drelu):
+
+class PoolCRBMRelu(BaseRelu):
     def __init__(self, config, debug=False, precision="double", meminfo=False):
         super().__init__(config, debug=debug, precision=precision)
 
@@ -84,40 +78,45 @@ class pool_crbm_relu(Base_drelu):
             self.register_parameter(f"{key}_0theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
             self.register_parameter(f"{key}_0gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
 
-        self.ind_temp_schedule = self.init_temp_schedule(config["ind_temp"])
-        self.seq_temp_schedule = self.init_temp_schedule(config["seq_temp"])
-
-
         # Saves Our hyperparameter options into the checkpoint file generated for Each Run of the Model
         # i.e. Simplifies loading a model that has already been run
         self.save_hyperparameters()
 
         # Initialize AIS/PT members
-        self.data_sampler = data_sampler(self, device=self.device)
+        self.data_sampler = DataSampler(self, device=self.device)
         self.log_Z_AIS = None
         self.log_Z_AIS_std = None
+
+        # Set training Function
+        if self.sample_type == "gibbs":
+            self.training_step = self.training_step_CD_free_energy
+        elif self.sample_type == "pt":
+            self.training_step = self.training_step_PT_free_energy
+        elif self.sample_type == "pcd":
+            self.training_step = self.training_step_PCD_free_energy
 
     @property
     def h_layer_num(self):
         return len(self.hidden_convolution_keys)
 
-    ## Used in our Loss Function
     def free_energy(self, v):
         return self.energy_v(v) - self.logpartition_h(self.compute_output_v(v))
 
     def free_energy_ind(self, v):
+        """Free energy contribution frome each hidden node"""
         h_ind = self.logpartition_h_ind(self.compute_output_v(v))
         return (self.energy_v(v)/h_ind.shape[1]).unsqueeze(1) - h_ind
 
-    ## Not used but may be useful
     def free_energy_h(self, h):
         return self.energy_h(h) - self.logpartition_v(self.compute_output_h(h))
 
-    ## Total Energy of a given visible and hidden configuration
+    ##
     def energy(self, v, h, remove_init=False, hidden_sub_index=-1):
+        """Total Energy of a given visible and hidden configuration"""
         return self.energy_v(v, remove_init=remove_init) + self.energy_h(h, sub_index=hidden_sub_index, remove_init=remove_init) - self.bidirectional_weight_term(v, h, hidden_sub_index=hidden_sub_index)
 
     def energy_PT(self, v, h, N_PT, remove_init=False):
+        """Total Energy of N_PT given visible and hidden configurations"""
         E = torch.zeros((N_PT, v.shape[1]), device=self.device)
         for i in range(N_PT):
             E[i] = self.energy_v(v[i], remove_init=remove_init) + self.energy_h(h, sub_index=i, remove_init=remove_init) - self.bidirectional_weight_term(v[i], h, hidden_sub_index=i)
@@ -138,7 +137,6 @@ class pool_crbm_relu(Base_drelu):
         else:
             return E.squeeze(0)
 
-    ############################################################# Individual Layer Functions
     def transform_v(self, I):
         return F.one_hot(torch.argmax(I + getattr(self, "fields").unsqueeze(0), dim=-1), self.q)
 
@@ -150,11 +148,10 @@ class pool_crbm_relu(Base_drelu):
             output.append(torch.maximum(I - theta, torch.tensor(0, device=self.device)) / gamma)
         return output
 
-    ## Computes -g(si) term of potential
-    def energy_v(self, config, remove_init=False):
-        # config is a one hot vector
-        v = config.type(torch.get_default_dtype())
-        E = torch.zeros(config.shape[0], device=self.device)
+    def energy_v(self, visible_config, remove_init=False):
+        """Computes -g(si) term of potential"""
+        v = visible_config.type(torch.get_default_dtype())
+        E = torch.zeros(visible_config.shape[0], device=self.device)
         for i in range(self.q):
             if remove_init:
                 E -= v[:, :, i].dot(getattr(self, "fields")[:, i] - getattr(self, "fields0")[:, i])
@@ -163,13 +160,13 @@ class pool_crbm_relu(Base_drelu):
 
         return E
 
-    ## Computes U(h) term of potential
-    def energy_h(self, config, remove_init=False, sub_index=-1):
-        # config is list of h_uks
+    def energy_h(self, hidden_config, remove_init=False, sub_index=-1):
+        """Computes U(h) term of potential"""
+        # hidden_config is list of h_uks
         if sub_index != -1:
-            E = torch.zeros((len(self.hidden_convolution_keys), config[0].shape[1]), device=self.device)
+            E = torch.zeros((len(self.hidden_convolution_keys), hidden_config[0].shape[1]), device=self.device)
         else:
-            E = torch.zeros((len(self.hidden_convolution_keys), config[0].shape[0]), device=self.device)
+            E = torch.zeros((len(self.hidden_convolution_keys), hidden_config[0].shape[0]), device=self.device)
 
         for iid, i in enumerate(self.hidden_convolution_keys):
             if remove_init:
@@ -180,9 +177,9 @@ class pool_crbm_relu(Base_drelu):
                 theta = getattr(self, f'{i}_theta').unsqueeze(0)
 
             if sub_index != -1:
-                con = config[iid][sub_index]
+                con = hidden_config[iid][sub_index]
             else:
-                con = config[iid]
+                con = hidden_config[iid]
 
             E[iid] = ((con.square() * gamma) / 2 + (con * theta)).sum(1)
 
@@ -191,8 +188,8 @@ class pool_crbm_relu(Base_drelu):
         else:
             return E.squeeze(0)
 
-    ## Random Config of Visible Potts States
     def random_init_config_v(self, custom_size=False, zeros=False):
+        """Random Config of Visible Potts States"""
         if custom_size:
             size = (*custom_size, self.v_num, self.q)
         else:
@@ -203,8 +200,8 @@ class pool_crbm_relu(Base_drelu):
         else:
             return self.sample_from_inputs_v(torch.zeros(size, device=self.device).flatten(0, -3), beta=0).reshape(size)
 
-    ## Random Config of Hidden dReLU States
     def random_init_config_h(self, zeros=False, custom_size=False):
+        """Random Config of Hidden ReLU States"""
         config = []
         for iid, i in enumerate(self.hidden_convolution_keys):
             batch, h_num, convx_num, convy_num = self.convolution_topology[i]["convolution_dims"]
@@ -235,31 +232,31 @@ class pool_crbm_relu(Base_drelu):
             new_config.append(new_h)
         return new_config
 
-    ## Marginal over hidden units
     def logpartition_h(self, inputs, beta=1):
+        """Marginal over hidden units"""
         # Input is list of matrices I_uk
         marginal = torch.zeros((len(self.hidden_convolution_keys), inputs[0].shape[0]), device=self.device)
         for iid, i in enumerate(self.hidden_convolution_keys):
-            marginal[iid] = self.cgf_from_inputs_h(inputs[iid], hidden_key=i).sum(-1)
+            marginal[iid] = self.cgf_from_inputs_h(inputs[iid], hidden_key=i, beta=beta).sum(-1)
         return marginal.sum(0)
 
     def logpartition_h_ind(self, inputs, beta=1):
-        # Input is list of matrices I_uk
+        """Marginal over hidden units"""
         ys = []
         for iid, i in enumerate(self.hidden_convolution_keys):
-            y = self.cgf_from_inputs_h(inputs[iid], hidden_key=i)
+            y = self.cgf_from_inputs_h(inputs[iid], hidden_key=i, beta=beta)
             ys.append(y)
         return torch.cat(ys, dim=1)
 
-    ## Marginal over visible units
     def logpartition_v(self, inputs, beta=1):
+        """Marginal over visible units"""
         if beta == 1:
             return torch.logsumexp(getattr(self, "fields")[None, :, :] + inputs, 2).sum(1)
         else:
             return torch.logsumexp((beta * getattr(self, "fields") + (1 - beta) * getattr(self, "fields0"))[None, :] + beta * inputs, 2).sum(1)
 
-    ## Mean of hidden layer specified by hidden_key
     def mean_h(self, psi, hidden_key=None, beta=1):
+        """Mean of hidden layer specified by hidden_key"""
         if hidden_key is None:
             hidden_key = self.hidden_convolution_keys
         elif type(hidden_key) is str:
@@ -283,9 +280,8 @@ class pool_crbm_relu(Base_drelu):
 
         return means
 
-
-    ## Compute Input for Hidden Layer from Visible Potts, Uses one hot vector
-    def compute_output_v(self, X):  # X is the one hot vector
+    def compute_output_v(self, X):
+        """Compute Input for Hidden Layer from Visible Potts, Uses one hot vector"""
         outputs = []
         self.max_inds = []
         self.min_inds = []
@@ -314,8 +310,8 @@ class pool_crbm_relu(Base_drelu):
 
         return outputs
 
-    # Compute Input for Visible Layer from Hidden dReLU
     def compute_output_h(self, h):  # from h_uk (B, hidden_num)
+        """Compute Input for Visible Layer from Hidden dReLU"""
         outputs = []
         for iid, i in enumerate(self.hidden_convolution_keys):
             reconst = self.unpools[iid](h[iid].view_as(self.max_inds[iid]), self.max_inds[iid])
@@ -334,8 +330,8 @@ class pool_crbm_relu(Base_drelu):
 
         return outputs[0]
 
-    # Gibbs Sampling of Potts Visbile Layer
     def sample_from_inputs_v(self, psi, beta=1):  # Psi ohe (Batch_size, v_num, q)   fields (self.v_num, self.q)
+        """Gibbs Sampling of Potts Visbile Layer"""
         if beta == 1:
             cum_probas = psi + getattr(self, "fields").unsqueeze(0)
         else:
@@ -381,10 +377,8 @@ class pool_crbm_relu(Base_drelu):
 
         return h_uks
 
-    ###################################################### Sampling Functions
-    # Samples hidden from visible and vice versa, returns newly sampled hidden and visible
     def markov_step(self, v, beta=1):
-        # Gibbs Sampler
+        """Gibbs Sampler, Samples hidden from visible and vice versa, returns newly sampled hidden and visible"""
         h = self.sample_from_inputs_h(self.compute_output_v(v), beta=beta)
         return self.sample_from_inputs_v(self.compute_output_h(h), beta=beta), h
 
@@ -393,22 +387,20 @@ class pool_crbm_relu(Base_drelu):
         # torch.nn.utils.clip_grad_norm_(self.parameters(), 10000, norm_type=2.0, error_if_nonfinite=True)
 
     # Clamps hidden potential values to acceptable range
-    def on_before_zero_grad(self, optimizer):
-        with torch.no_grad():
-            for key in self.hidden_convolution_keys:
-                getattr(self, f"{key}_gamma").data.clamp_(min=0.05)
-                getattr(self, f"{key}_theta").data.clamp_(min=0.0)
-                getattr(self, f"{key}_W").data.clamp_(-1.0, 1.0)
+    # def on_before_zero_grad(self, optimizer):
+    #     """ clip parameters to acceptable values """
+    #     with torch.no_grad():
+    #         for key in self.hidden_convolution_keys:
+    #             getattr(self, f"{key}_gamma").data.clamp_(min=0.05)
+    #             getattr(self, f"{key}_theta").data.clamp_(min=0.0)
+    #             getattr(self, f"{key}_W").data.clamp_(-1.0, 1.0)
 
-    ## Calls Corresponding Training Function
-    def training_step(self, batch, batch_idx):
-        # All other functions use self.W for the weights
-        if self.sample_type == "gibbs":
-            return self.training_step_CD_free_energy(batch, batch_idx)
-        elif self.sample_type == "pt":
-            return self.training_step_PT_free_energy(batch, batch_idx)
-        elif self.sample_type == "pcd":
-            return self.training_step_PCD_free_energy(batch, batch_idx)
+    def on_before_backward(self, loss):
+        """ clip parameters to acceptable values """
+        for key in self.hidden_convolution_keys:
+            getattr(self, f"{key}_gamma").data.clamp_(min=0.05)
+            getattr(self, f"{key}_theta").data.clamp_(min=0.0)
+            getattr(self, f"{key}_W").data.clamp_(-1.0, 1.0)
 
     def validation_step(self, batch, batch_idx):
         inds, seqs, one_hot, seq_weights = batch
@@ -663,12 +655,12 @@ class pool_crbm_relu(Base_drelu):
 
     # X must be a pandas dataframe with the sequences in string format under the column 'sequence'
     # Returns the likelihood for each sequence in an array
-    def predict(self, dataframe, column_key='sequence', individual_hiddens=False, device='cpu'):
+    def predict(self, dataframe, individual_hiddens=False):
         # Read in data
         reader = Categorical(dataframe, self.q, weights=None, max_length=self.v_num, alphabet=self.alphabet,
                              device=torch.device('cpu'), one_hot=True)
         # Put in Dataloader
-        data_loader = torch.utils.data.DataLoader(
+        data_loader = DataLoader(
             reader,
             batch_size=self.batch_size,
             num_workers=self.worker_num,  # Set to 0 if debug = True
@@ -681,7 +673,7 @@ class pool_crbm_relu(Base_drelu):
             for i, batch in enumerate(data_loader):
                 inds, seqs, one_hot, seq_weights = batch
                 oh = one_hot.to(torch.device(self.device))
-                likelihood += self.likelihood(one_hot, individual_hiddens=individual_hiddens).detach().cpu().tolist()
+                likelihood += self.likelihood(oh, individual_hiddens=individual_hiddens).detach().cpu().tolist()
 
         return dataframe.sequence.tolist(), likelihood
 
@@ -748,315 +740,3 @@ class pool_crbm_relu(Base_drelu):
         log_gamma = torch.log(gamma).expand(B, -1)
         out = self.log_erf_times_gauss((-I + theta) / sqrt_gamma) - 0.5 * log_gamma
         return out
-
-
-
-
-class data_sampler:
-    def __init__(self, pcrbm, device='cpu', **kwargs):
-
-        self.model = pcrbm
-        self.device = torch.device(device)
-
-        self.record_acceptance = False
-        self.record_swaps = False
-
-        self.count_swaps = 0
-        self.last_at_zero = None
-        self.trip_duration = None
-
-        for k, v in kwargs:
-            setattr(self, k, v)
-
-    def update_betas(self, N_PT, beta=1, update_betas_lr=0.1, update_betas_lr_decay=1):
-        with torch.no_grad():
-            stiffness = torch.maximum(1 - (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()),
-                                           torch.zeros_like(self.mav_acceptance_rates, device=self.device)) \
-                                      + 1e-4 * torch.ones(N_PT - 1)
-            diag = stiffness[0:-1] + stiffness[1:]
-            offdiag_g = -stiffness[1:-1]
-            offdiag_d = -stiffness[1:-1]
-            M = torch.diag(offdiag_g, -1) + torch.diag(diag, 0) + torch.diag(offdiag_d, 1)
-
-            B = torch.zeros(N_PT - 2, device=self.device)
-            B[0] = stiffness[0] * beta
-            self.betas[1:-1] = self.betas[1:-1] * (1 - update_betas_lr) + update_betas_lr * torch.linalg.solve(M, B)
-            update_betas_lr *= update_betas_lr_decay
-
-    def markov_PT_and_exchange(self, v, h, e, N_PT):
-        for i, beta in zip(torch.arange(N_PT), self.betas):
-            v[i], htmp = self.model.markov_step(v[i], beta=beta)
-            for hid in range(self.model.h_layer_num):
-                h[hid][i] = htmp[hid]
-            e[i] = self.model.energy(v[i], h, hidden_sub_index=i)
-
-        if self.record_swaps:
-            particle_id = torch.arange(N_PT).unsqueeze(1).expand(N_PT, v.shape[1])
-
-        betadiff = self.betas[1:] - self.betas[:-1]
-        for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
-            proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i]))
-            swap = torch.rand(proba.shape[0], device=self.device) < proba
-            if i > 0:
-                v[i:i + 2, swap] = torch.flip(v[i - 1: i + 1], [0])[:, swap]
-                for hid in range(self.model.h_layer_num):
-                    h[hid][i:i + 2, swap] = torch.flip(h[hid][i - 1: i + 1], [0])[:, swap]
-
-                e[i:i + 2, swap] = torch.flip(e[i - 1: i + 1], [0])[:, swap]
-                if self.record_swaps:
-                    particle_id[i:i + 2, swap] = torch.flip(particle_id[i - 1: i + 1], [0])[:, swap]
-            else:
-                v[i:i + 2, swap] = torch.flip(v[:i + 1], [0])[:, swap]
-                for hid in range(self.model.h_layer_num):
-                    h[hid][i:i + 2, swap] = torch.flip(h[hid][:i + 1], [0])[:, swap]
-                e[i:i + 2, swap] = torch.flip(e[:i + 1], [0])[:, swap]
-                if self.record_swaps:
-                    particle_id[i:i + 2, swap] = torch.flip(particle_id[:i + 1], [0])[:, swap]
-
-            if self.record_acceptance:
-                self.acceptance_rates[i] = swap.type(torch.get_default_dtype()).mean()
-                self.mav_acceptance_rates[i] = self.mavar_gamma * self.mav_acceptance_rates[i] + self.acceptance_rates[
-                    i] * (1 - self.mavar_gamma)
-
-        if self.record_swaps:
-            self.particle_id.append(particle_id)
-
-        self.count_swaps += 1
-        return v, h, e
-
-    def AIS(self, M=10, n_betas=10000, batches=None, verbose=0, beta_type='adaptive'):
-        with torch.no_grad():
-            if beta_type == 'linear':
-                betas = torch.arange(n_betas, device=self.device) / torch.tensor(n_betas - 1, dtype=torch.float64,
-                                                                                 device=self.device)
-            elif beta_type == 'root':
-                betas = torch.sqrt(torch.arange(n_betas, device=self.device)) / \
-                        torch.tensor(n_betas - 1, dtype=torch.float64, device=self.device)
-            elif beta_type == 'adaptive':
-                Nthermalize = 200
-                Nchains = 20
-                N_PT = 11
-                # adaptive_PT_lr = 0.05
-                # adaptive_PT_decay = True
-                # adaptive_PT_lr_decay = 10 ** (-1 / float(Nthermalize))
-                if verbose:
-                    t = time.time()
-                    print('Learning betas...')
-                self.gen_data(N_PT=N_PT, Nchains=Nchains, Lchains=1, Nthermalize=Nthermalize, update_betas=True)
-                if verbose:
-                    print('Elapsed time: %s, Acceptance rates: %s' % (time.time() - t, self.mav_acceptance_rates))
-                betas = []
-                sparse_betas = self.betas.flip(0)
-                for i in range(N_PT - 1):
-                    betas += list(
-                        sparse_betas[i] + (sparse_betas[i + 1] - sparse_betas[i]) *
-                        torch.arange(n_betas / (N_PT - 1),  device=self.device) /
-                        (n_betas / (N_PT - 1) - 1))
-                betas = torch.tensor(betas, device=self.device)
-                n_betas = betas.shape[0]
-
-            # Initialization.
-            log_weights = torch.zeros(M, device=self.device)
-            # config = self.gen_data(Nchains=M, Lchains=1, Nthermalize=0, beta=0)
-
-            config = [self.model.sample_from_inputs_v(self.model.random_init_config_v(custom_size=(M,))),
-                      self.model.sample_from_inputs_h(self.model.random_init_config_h(custom_size=(M,)))]
-
-            log_Z_init = torch.zeros(1, device=self.device)
-            log_Z_init += self.model.logpartition_h(self.model.random_init_config_h(custom_size=(1,), zeros=True), beta=0)
-            log_Z_init += self.model.logpartition_v(self.model.random_init_config_v(custom_size=(1,), zeros=True), beta=0)
-
-            if verbose:
-                print(f'Initial evaluation: log(Z) = {log_Z_init.data}')
-
-            for i in range(1, n_betas):
-                if verbose:
-                    if (i % 2000 == 0):
-                        print(f'Iteration {i}, beta: {betas[i]}')
-                        print('Current evaluation: log(Z)= %s +- %s' % (
-                        (log_Z_init + log_weights).mean(), (log_Z_init + log_weights).std() / np.sqrt(M)))
-
-                config[0], config[1] = self.model.markov_step(config[0], beta=betas[i])
-                energy = self.model.energy(config[0], config[1])
-                log_weights += -(betas[i] - betas[i - 1]) * energy
-
-            log_Z_AIS = (log_Z_init + log_weights).mean()
-            log_Z_AIS_std = (log_Z_init + log_weights).std() / np.sqrt(M)
-            if verbose:
-                print('Final evaluation: log(Z)= %s +- %s' % (log_Z_AIS, log_Z_AIS_std))
-            return log_Z_AIS, log_Z_AIS_std
-
-    def _gen_data(self, Nthermalize, Ndata, Nstep, N_PT=1, batches=1, reshape=True,
-                   config_init=[], beta=1, record_replica=False, update_betas=False):
-
-        if Ndata < 2:
-            raise Exception("Ndata must be 2 or greater!")
-
-        with torch.no_grad():
-            if update_betas or len(self.betas) != N_PT:
-                self.betas = torch.flip(torch.arange(N_PT, device=self.device) / (N_PT - 1) * beta, [0])
-
-            self.acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
-            self.mav_acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
-
-            self.count_swaps = 0
-
-            if self.record_swaps:
-                self.particle_id = [torch.arange(N_PT, device=self.device)[:, None].repeat(batches, dim=1)]
-
-            Ndata /= batches
-            Ndata = int(Ndata)
-
-            if config_init != []:
-                config = config_init
-            else:
-                config = [self.model.random_init_config_v(custom_size=(N_PT, batches)),
-                          self.model.random_init_config_h(custom_size=(N_PT, batches))]
-
-            for _ in range(Nthermalize):
-                energy = self.model.energy_PT(config[0], config[1], N_PT)
-                config[0], config[1], energy = self.model.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
-                if update_betas:
-                    self.update_betas(N_PT, beta=beta)
-
-            # if record_replica:
-            #     data = [config[0].clone().unsqueeze(0), self.model.clone_h(config[1], expand_dims=[0])]
-            # else:
-            #     data = [config[0][0].clone().unsqueeze(0), self.model.clone_h(config[1], expand_dims=[0], sub_index=0)]
-
-            if record_replica:
-                data_gen_v = self.model.random_init_config_v(custom_size=(Ndata, N_PT, batches), zeros=True)
-                data_gen_h = self.model.random_init_config_h(custom_size=(Ndata, N_PT, batches), zeros=True)
-                data_gen_v[0] = config[0].clone()
-
-                clone = self.model.clone_h(config[1])
-                for hid in range(self.model.h_layer_num):
-                    data_gen_h[hid][0] = clone[hid]
-            else:
-                data_gen_v = self.model.random_init_config_v(custom_size=(Ndata, batches), zeros=True)
-                data_gen_h = self.model.random_init_config_h(custom_size=(Ndata, batches), zeros=True)
-                data_gen_v[0] = config[0][0].clone()
-
-                clone = self.model.clone_h(config[1], sub_index=0)
-                for hid in range(self.model.h_layer_num):
-                    data_gen_h[hid][0] = clone[hid]
-
-            for n in range(Ndata - 1):
-                for _ in range(Nstep):
-                    energy = self.model.energy_PT(config[0], config[1], N_PT)
-                    config[0], config[1], energy = self.model.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
-                    if update_betas:
-                        self.update_betas(N_PT, beta=beta)
-
-
-                if record_replica:
-                    data_gen_v[n + 1] = config[0].clone()
-
-                    clone = self.model.clone_h(config[1])
-                    for hid in range(self.model.h_layer_num):
-                        data_gen_h[hid][n + 1] = clone[hid]
-
-
-            data = [data_gen_v, data_gen_h]
-
-            if self.record_swaps:
-                print('cleaning particle trajectories')
-                positions = torch.tensor(self.particle_id)
-                invert = torch.zeros([batches, Ndata, N_PT], device=self.device)
-                for b in range(batches):
-                    for i in range(Ndata):
-                        for k in range(N_PT):
-                            invert[b, i, k] = torch.nonzero(positions[i, :, b] == k)[0]
-                self.particle_id = invert
-                self.last_at_zero = torch.zeros([batches, Ndata, N_PT], device=self.device)
-                for b in range(batches):
-                    for i in range(Ndata):
-                        for k in range(N_PT):
-                            tmp = torch.nonzero(self.particle_id[b, :i, k] == 0)[0]
-                            if len(tmp) > 0:
-                                self.last_at_zero[b, i, k] = i - 1 - tmp.max()
-                            else:
-                                self.last_at_zero[b, i, k] = 1000
-                self.last_at_zero[:, 0, 0] = 0
-
-                self.trip_duration = torch.zeros([batches, Ndata], device=self.device)
-                for b in range(batches):
-                    for i in range(Ndata):
-                        self.trip_duration[b, i] = self.last_at_zero[b, i, torch.nonzero(invert[b, i, :] == 9)[0]]
-
-            if reshape:
-                data[0] = data[0].flatten(0, -3)
-                data[1] = [hd.flatten(0, -3) for hd in data[1]]
-            else:
-                data[0] = data[0]
-                data[1] = data[1]
-
-            return data
-
-    def gen_data(self, Nchains=10, Lchains=100, Nthermalize=0, Nstep=1, N_PT=2, config_init=[], beta=1, batches=None,
-                 reshape=True, record_replica=False, record_acceptance=None, update_betas=None, record_swaps=False):
-        """
-        Generate Monte Carlo samples from the RBM. Starting from random initial conditions, Gibbs updates are performed to sample from equilibrium.
-        Inputs :
-            Nchains (10): Number of Markov chains
-            Lchains (100): Length of each chain
-            Nthermalize (0): Number of Gibbs sampling steps to perform before the first sample of a chain.
-            Nstep (1): Number of Gibbs sampling steps between each sample of a chain
-            N_PT (2): Number of Monte Carlo Exchange replicas to use. This==useful if the mixing rate==slow. Watch self.acceptance_rates_g to check that it==useful (acceptance rates about 0==useless)
-            batches (10): Number of batches. Must divide Nchains. higher==better for speed (more vectorized) but more RAM consuming.
-            reshape (True): If True, the output==(Nchains x Lchains, n_visibles/ n_hiddens) (chains mixed). Else, the output==(Nchains, Lchains, n_visibles/ n_hiddens)
-            config_init ([]). If not [], a Nchains X n_visibles numpy array that specifies initial conditions for the Markov chains.
-            beta (1): The inverse temperature of the model.
-        """
-        if N_PT < 2:
-            raise Exception("N_PT must be greater than 1")
-
-        with torch.no_grad():
-            if batches == None:
-                batches = Nchains
-            n_iter = int(Nchains / batches)
-            Ndata = Lchains * batches
-            if record_replica:
-                reshape = False
-
-                if record_acceptance == None:
-                    record_acceptance = True
-
-                if update_betas == None:
-                    update_betas = False
-
-                if update_betas:
-                    record_acceptance = True
-
-            else:
-                record_acceptance = False
-                update_betas = False
-
-            if record_replica:
-                visible_data = self.model.random_init_config_v(custom_size=(Nchains, N_PT, Lchains), zeros=True)
-                hidden_data = self.model.random_init_config_h(custom_size=(Nchains, N_PT, Lchains), zeros=True)
-                data = [visible_data, hidden_data]
-
-            if config_init is not []:
-                if type(config_init) == torch.tensor:
-                    h_layer = self.model.random_init_config_h()
-                    config_init = [config_init, h_layer]
-
-            for i in range(n_iter):
-                if config_init != []:
-                    config_init = [config_init[0][batches * i:batches * (i + 1)],
-                                   config_init[1][batches * i:batches * (i + 1)]]
-
-                config = self._gen_data(Nthermalize, Ndata, Nstep, N_PT=N_PT, batches=batches, reshape=False,
-                                        beta=beta, record_replica=record_replica, update_betas=update_betas)
-
-
-                if record_replica:
-                    data[0][batches * i:batches * (i + 1)] = torch.swapaxes(config[0], 0, 2).clone()
-                    for hid in range(self.model.h_layer_num):
-                        data[1][hid][batches * i:batches * (i + 1)] = torch.swapaxes(config[1][hid], 0, 2).clone()
-
-            if reshape:
-                return [data[0].flatten(0, -3), [hd.flatten(0, -3) for hd in data[1]]]
-            else:
-                return data

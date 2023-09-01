@@ -3,6 +3,7 @@ from pytorch_lightning import Trainer
 
 import argparse
 import os
+
 from rbm_torch.models.crbm_base import CRBM
 from rbm_torch.models.pool_crbm_base import pool_CRBM
 from rbm_torch.models.pool_crbm_relu_base import pool_CRBM_relu

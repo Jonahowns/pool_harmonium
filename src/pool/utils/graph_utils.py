@@ -10,7 +10,7 @@ from matplotlib.patches import PathPatch
 from matplotlib.textpath import TextPath
 from matplotlib.ticker import FormatStrFormatter
 
-from pool.alphabet import get_alphabet
+from pool.utils.alphabet import get_alphabet
 
 # Implementation inspired from https://stackoverflow.com/questions/42615527/sequence-logos-in-matplotlib-aligning-xticks
 # Color choice inspired from: http://weblogo.threeplusone.com/manual.html

@@ -1,3 +1,10 @@
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+
+from pool.utils.alphabet import get_alphabet
 
 
 # adapted from https://github.com/pytorch/pytorch/issues/7359
@@ -27,7 +34,7 @@ class WeightedSubsetRandomSampler:
         self.replacement = per_sample_replacement  # can't think of a good reason to have this on
 
         self.label_set = list(set(labels))
-        self.sample_per_label = [math.floor(x*self.batch_size) for x in group_fraction]
+        self.sample_per_label = [int(x*self.batch_size) for x in group_fraction]
         # self.sample_per_label = self.num_samples // len(self.label_set)
 
         self.label_weights, self.label_indices = [], []
@@ -119,13 +126,7 @@ class Categorical(Dataset):
         self.dataset = dataframe.reset_index(drop=True)
 
         # dictionaries mapping One letter code to integer for all macro molecule types
-        if type(alphabet) is str:
-            try:
-                self.base_to_id = letter_to_int_dicts[alphabet]
-            except:
-                print(f"Molecule {alphabet} not supported. Please use protein, dna, or rna")
-        elif type(alphabet) is dict:
-            self.base_to_id = alphabet
+        self.base_to_id = get_alphabet(alphabet)
 
         # number of possible bases
         self.n_bases = q

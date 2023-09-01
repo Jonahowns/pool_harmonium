@@ -10,4 +10,5 @@ matplotlib
 glob2
 argparse
 Pillow
+tbparse
 ViennaRNA

@@ -1,11 +1,11 @@
-from nupack import *
+# from nupack import *
 import pandas as pd
 
-config.parallelism = True
-config.cache = 8.0 # GB
+# config.parallelism = True
+# config.cache = 8.0 # GB
 
 
-from rbm_torch.utils.utils import fasta_read
+from pool.utils.io import fasta_read
 
 import math
 from copy import copy

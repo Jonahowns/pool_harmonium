@@ -1,18 +1,22 @@
-import pandas as pd
 from sklearn.metrics import pairwise_distances
 from sklearn.metrics.pairwise import pairwise_distances_chunked
-from rbm_torch.utils import utils
 import torch
 import numpy as np
 
-# from SetSimilaritySearch import all_pairs, SearchIndex
+
 import multiprocessing as mp
 from functools import partial
-import pickle
+
+# from SetSimilaritySearch import all_pairs, SearchIndex
+# import pickle
+# import pandas as pd
+
+from pool.utils.alphabet import get_alphabet
 
 
-def cat_to_seq(categorical_tensor, molecule="protein"):
-    base_to_id = utils.int_to_letter_dicts[molecule]
+def cat_to_seq(categorical_tensor, alphabet="protein"):
+    """takes tensor of integers and returns corresponding string using provided alphabet"""
+    base_to_id = get_alphabet(alphabet)
     seqs = []
     for i in range(categorical_tensor.shape[0]):
         seq = ""
@@ -22,9 +26,9 @@ def cat_to_seq(categorical_tensor, molecule="protein"):
     return seqs
 
 
-def seq_to_cat(seqs, molecule="protein"):
+def seq_to_cat(seqs, alphabet="protein"):
     """takes seqs as list of strings and returns a categorical vector"""
-    base_to_id = utils.letter_to_int_dicts[molecule]
+    base_to_id = get_alphabet(alphabet)
     return torch.tensor(list(map(lambda x: [base_to_id[y] for y in x], seqs)), dtype=torch.long)
 
 
@@ -37,18 +41,18 @@ def cat_to_one_hot(cat_seqs, q):
     return one_hot
 
 
-def find_nearest(sequence, dataframe, hamming_threshold=0, molecule="protein"):
+def find_nearest(sequence, dataframe, hamming_threshold=0, alphabet="protein"):
     """Find sequences in dataframe within number of mutations of a given sequence"""
 
     # categorical vector for query sequence
-    cat_query = seq_to_cat([sequence], molecule=molecule)
+    cat_query = seq_to_cat([sequence], alphabet=alphabet)
 
     seq_len = len(sequence)
 
     # categorical vector for database sequences
     database_seqs = dataframe["sequence"].tolist()
 
-    database_cat = seq_to_cat(database_seqs, molecule=molecule)
+    database_cat = seq_to_cat(database_seqs, alphabet=alphabet)
 
     dist_matrix = pairwise_distances(cat_query, database_cat, metric="hamming") * seq_len
 
@@ -57,14 +61,14 @@ def find_nearest(sequence, dataframe, hamming_threshold=0, molecule="protein"):
     return dataframe[seqs_of_interest]
 
 
-def prune_similar_sequences(dataframe, hamming_threshold=0, molecule="protein"):
+def prune_similar_sequences(dataframe, hamming_threshold=0, alphabet="protein"):
     """generate subset of sequences that are at least x mutations away from one another,
     first occurrence is kept so make sure to sort dataframe prior"""
     dataframe.reset_index(drop=True, inplace=True)
     seqs = dataframe["sequence"].tolist()
     index = dataframe.index.tolist()
 
-    cat = seq_to_cat(seqs, molecule=molecule)
+    cat = seq_to_cat(seqs, alphabet=alphabet)
     X = cat.numpy().astype(np.int8)
 
     seq_len = len(seqs[0])
@@ -90,20 +94,20 @@ def prune_similar_sequences(dataframe, hamming_threshold=0, molecule="protein"):
     return dataframe
 
 
-def prune_similar_sequences_df(df1, df2, hamming_threshold=0, molecule="protein", return_min_distances=False):
+def prune_similar_sequences_df(df1, df2, hamming_threshold=0, alphabet="protein", return_min_distances=False):
     """generate subset of sequences in df1 that are at least x mutations away from all sequences in df2"""
     df1.reset_index(drop=True, inplace=True)
     df1_seqs = df1["sequence"].tolist()
     df1_index = df1.index.tolist()
 
-    df1_cat = seq_to_cat(df1_seqs, molecule=molecule)
+    df1_cat = seq_to_cat(df1_seqs, alphabet=alphabet)
     X = df1_cat.numpy().astype(np.int8)
 
     df2.reset_index(drop=True, inplace=True)
     df2_seqs = df2["sequence"].tolist()
     df2_index = df2.index.tolist()
 
-    df2_cat = seq_to_cat(df2_seqs, molecule=molecule)
+    df2_cat = seq_to_cat(df2_seqs, alphabet=alphabet)
     Y = df2_cat.numpy().astype(np.int8)
 
     seq_len = len(df1_seqs[0])

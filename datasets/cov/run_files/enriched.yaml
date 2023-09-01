@@ -1,0 +1,100 @@
+# =================================================================
+# General Information
+# =================================================================
+general:
+  # Run Name: don't make this too complicated
+  name: cov_enriched
+  # Directory where data is. Absolute path may be needed for slurm etc.
+  # If Relative path, make relative to parent directory pool_harmonium
+  data_directory: ./datasets/cov/
+  # Where to save the model, same rules apply as for data_directory
+  save_directory: ./datasets/cov/trained/
+  # How many gpus?
+  gpus: 1
+  # precision single or double, doesn't seem to effect end model so single is much faster
+  precision: single
+  # Set Pytorch seed for reproducible runs
+  seed: 0
+
+  epochs: 1000
+
+# =================================================================
+# Dataset Information
+# =================================================================
+dataset:
+  # The sequence file, must be in fasta format
+  fasta_file: ["cov_enriched.fasta"]
+  # Number of dataworkers to use, Too many = too much memory, too few = slower performance
+  # Usually 2-4 is perfect
+  data_worker_num: 2
+  # Mapping from Base (char) to integer. Can be dictionary {"A":0, "B": 1, "C": 2}
+  # Or a provided mapping, input str must be: 'dna', 'protein', 'rna'
+  alphabet: dna
+  #Number of possible states for each base, for ex. dictionary above it would be 3
+  q: 5
+  # visible units, must equal the length of each datapoint/sequence
+  v_num: 40
+  # fraction of dataset to use for a test set
+  test_set_size: 0.1
+  # fraction of remaining dataset to use as validation
+  validation_set_size: 0.15
+
+  sampling_options:
+    # Options: random, weighted, stratified, weighted_stratified
+    sampling_strategy: weighted
+    # Must be None or fasta
+    sampling_weights: fasta
+
+    # Only used if a stratified sampling_strategy is chosen
+    # Using a provided list, it separates the sequences using their weights
+    label_spacing: [0.0, 6.0]
+    # Set the fraction of each subset to be present in a batch
+    group_fraction: [ 1.0 ]
+    # Only used for weighted/weighted stratified, defines how many batches of sampled sequences
+    sample_multiplier: 50
+
+# =================================================================
+# Model Information
+# =================================================================
+model:
+  # Must match a class defined in pool.models
+  # options are PoolCRBMRelu
+  model_type: PoolCRBMRelu
+  batch_size: 20000
+  mc_moves: 3
+  loss_type: free_energy
+  sample_type: pcd
+  sequence_weights: None
+
+  # Regularization Options
+  regularization:
+    lgap: 1.05
+    lbs: 0.0
+    l1_2: 20.0
+    lf: 10
+    lcorr: 50.0
+    ld: 0.5
+    lkd: 5
+    dr: 0.0
+
+  optimizer:
+    # which optimizer must be Adam, AdamW
+    name: AdamW
+    # Weight decay on optimizer
+    weight_decay: 0.0
+    # learning rate
+    lr: 0.004
+    # Final Learning Rate
+    # What should learning rate decay to? None sets final learning rate to
+    lr_final: None
+    # When should final learning rate be reached (on epoch decay_after*epochs)
+    decay_after: 0.75
+
+  convolution_topology:
+    hidden_25:
+      number: 80
+      kernel: [35, 5]
+      stride: [1, 1]
+      padding: [0, 0]
+      dilation: [1, 1]
+      output_padding: [0, 0]

@@ -1,8 +1,12 @@
 # import sys
 # sys.path.append("../")
 
-from rbm_torch.utils import utils
-from rbm_torch.models.rbm import RBM
+
+from pool.utils.model_utils import get_beta_and_W
+from pool.utils.alphabet import get_alphabet
+from pool.utils.io import fasta_read
+from pool.utils.graph_utils import sequence_logo_multiple, sequence_logo, sequence_logo_all
+# from rbm_torch.models.rbm import RBM
 # from crbm import CRBM
 # from rbm import RBM
 
@@ -51,7 +55,7 @@ def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, molec
         contains data from provided fasta files with columns "sequence", "round", "assignment", and "copy_num"
     """
     for xid, x in enumerate(fasta_names):
-        seqs, counts, all_chars, q_data = utils.fasta_read(dir + x + ".fasta", molecule, drop_duplicates=drop_duplicates, threads=threads)
+        seqs, counts, all_chars, q_data = fasta_read(dir + x + ".fasta", molecule, drop_duplicates=drop_duplicates, threads=threads)
         round_label = [x for i in range(len(seqs))]
         if assignment_function is not None:
             assignment = [assignment_function(i) for i in counts]
@@ -305,7 +309,7 @@ def seq_logo(dataframe, output_file, weight=False, outdir=""):
 
 
 def view_weights(rbm, type="top", selected=None, molecule="protein", title=None, view="full", remove_gaps=False):
-    beta, W = utils.get_beta_and_W(rbm)
+    beta, W = get_beta_and_W(rbm)
     order = np.argsort(beta)[::-1]
     assert type in ["top", "unordered"]
     assert molecule in ["protein", "dna", "rna"]
@@ -333,11 +337,11 @@ def view_weights(rbm, type="top", selected=None, molecule="protein", title=None,
     if remove_gaps:
         selected_weights[:, :, -1] = 0.
     # Assume we want weights
-    fig = utils.sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
+    fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
 
 
 def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="protein", title=None, view="full", ax=None):
-    beta, W = utils.get_beta_and_W(crbm, hidden_key=hidden_key)
+    beta, W = get_beta_and_W(crbm, hidden_key=hidden_key)
     order = np.argsort(beta)[::-1]
     assert sort in ["top", "unordered"]
     assert molecule in ["protein", "dna", "rna"]
@@ -363,7 +367,7 @@ def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="pro
         selected_weights = np.minimum(selected_weights, 0.)
 
     # Assume we want weights
-    fig = utils.sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
+    fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
 
 
 def dataframe_to_input(dataframe, base_to_id, v_num, weights=False):
@@ -389,7 +393,7 @@ def cgf_with_weights_plot(rbm, dataframe, hidden_unit_numbers):
     input_hiddens = rbm.compute_output_v(data_tensor).detach().numpy()
 
     # Get Beta and sort hidden Units by Frobenius Norms
-    beta, W = utils.get_beta_and_W(rbm)
+    beta, W = get_beta_and_W(rbm)
     order = np.argsort(beta)[::-1]
 
     gs_kw = dict(width_ratios=[3, 1], height_ratios=[1 for x in hidden_unit_numbers])
@@ -409,7 +413,7 @@ def cgf_with_weights_plot(rbm, dataframe, hidden_unit_numbers):
     for hid, hu_num in enumerate(hidden_unit_numbers):
         ix = order[hu_num]  # get weight index
         # Make Sequence Logo
-        utils.sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule='protein')
+        sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule='protein')
 
         t_x = np.asarray(fullranges[:, ix])
         t_y = np.asarray(pre_cgf[:, ix])
@@ -433,7 +437,7 @@ def plot_input_mean(RBM, I, hidden_unit_numbers, I_range=None, weights=None, xla
         hidden_unit_numbers = [hidden_unit_numbers]
 
     # Get order of highest normed weights
-    beta, W = utils.get_beta_and_W(RBM)
+    beta, W = get_beta_and_W(RBM)
     order = np.argsort(beta)[::-1]
 
     # Change hidden unit numbers to correspond to the max weights inputs
@@ -608,8 +612,8 @@ def multi_peak_seq_log_fig(data, likelihoods, round, bounds, weight=False, title
 
 
 class Motif_Finder():
-    def __init__(self, *motif_files, motif_states, motif_len, molecule='dna', gaps=False, motif_format="hmm"):
-        self.base_to_id = utils.letter_to_int_dicts[molecule]
+    def __init__(self, *motif_files, motif_states, motif_len, alphabet='protein', gaps=False, motif_format="hmm"):
+        self.base_to_id = get_alphabet(alphabet)
 
         dna = ['A', 'C', 'G', 'T']
         dnar = {'A':0, 'C':1, 'G':2, 'T':3}
@@ -752,18 +756,19 @@ def parse_tb_files_crbm(model_str, model_dir="./", version=None):
     return df
 
 if __name__ == '__main__':
-    mdir = "/mnt/D1/globus/pig_trained_rbms/"
-    rounds = ["b3", "n1", "np1", "np2", "np3"]
-    c1_rounds = [x + "_c1" for x in rounds]
-    c2_rounds = [x + "_c2" for x in rounds]
-
-    data_c2 = fetch_data(c2_rounds, dir="../../pig", counts=True)
-    b3_data = data_c2[data_c2["round"] == "b3_c2"]
-    # b3_input, b3_weight_list = dataframe_to_input(b3_data, int_to_letter_dicts["protein"], 45, weights=True)
-    checkp, v_dir = utils.get_checkpoint_path("b3_c2", rbmdir=mdir)
-    b3_rbm = RBM.load_from_checkpoint(checkp)
-    cgf_with_weights_plot(b3_rbm, b3_data, [0, 1, 2, 5, 8, 9, 10, 12, 14, 16])
-    print("hello")
+    pass
+    # mdir = "/mnt/D1/globus/pig_trained_rbms/"
+    # rounds = ["b3", "n1", "np1", "np2", "np3"]
+    # c1_rounds = [x + "_c1" for x in rounds]
+    # c2_rounds = [x + "_c2" for x in rounds]
+    #
+    # data_c2 = fetch_data(c2_rounds, dir="../../pig", counts=True)
+    # b3_data = data_c2[data_c2["round"] == "b3_c2"]
+    # # b3_input, b3_weight_list = dataframe_to_input(b3_data, int_to_letter_dicts["protein"], 45, weights=True)
+    # checkp, v_dir = get_checkpoint_path("b3_c2", rbmdir=mdir)
+    # b3_rbm = RBM.load_from_checkpoint(checkp)
+    # cgf_with_weights_plot(b3_rbm, b3_data, [0, 1, 2, 5, 8, 9, 10, 12, 14, 16])
+    # print("hello")
 
 
 

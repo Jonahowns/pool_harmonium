@@ -1,3 +1,8 @@
+import json
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
 
 
 def make_weight_file(filebasename, weights, dir="./", other_data=None):
