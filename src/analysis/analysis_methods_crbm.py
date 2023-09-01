@@ -111,7 +111,7 @@ def data_with_weights_plot(crbm, dataframe, hidden_key, hidden_unit_numbers, kdi
     for hid, hu_num in enumerate(hidden_unit_numbers):
         ix = order[hu_num]  # get hidden units by frobenius norm order (look at get_beta_and_W)
         # Make Sequence Logo
-        utils.Sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule=crbm.molecule)
+        utils.sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule=crbm.molecule)
 
         if kdim != "full":
             t_x = np.asarray(range_data[:, ix])

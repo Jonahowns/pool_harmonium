@@ -10,13 +10,15 @@ from matplotlib.patches import PathPatch
 from matplotlib.textpath import TextPath
 from matplotlib.ticker import FormatStrFormatter
 
+from pool.alphabet import get_alphabet
 
+# Implementation inspired from https://stackoverflow.com/questions/42615527/sequence-logos-in-matplotlib-aligning-xticks
+# Color choice inspired from: http://weblogo.threeplusone.com/manual.html
 
-## Implementation inspired from https://stackoverflow.com/questions/42615527/sequence-logos-in-matplotlib-aligning-xticks
-## Color choice inspired from: http://weblogo.threeplusone.com/manual.html
 
 def clean_ax(ax):
     ax.axis("off")
+
 
 def get_ax(ax, i, nrows, ncols):
     if (ncols > 1) & (nrows > 1):
@@ -43,7 +45,7 @@ def select_sites(W, window=5, theta_important=0.25):
     return selected
 
 
-def ticksAt(selected, ticks_every=10):
+def ticks_at(selected, ticks_every=10):
     n_selected = len(selected)
     all_ticks = []
     all_ticks_labels = []
@@ -61,11 +63,11 @@ def ticksAt(selected, ticks_every=10):
     return np.array(all_ticks), np.array(all_ticks_labels)
 
 
-def breaksAt(x, maxi_size, ax):
+def breaks_at(x, maxi_size, ax):
     ax.plot([x, x], [-maxi_size, maxi_size], linewidth=5, c='black', linestyle='--')
 
 
-def letterAt(letter, x, y, letters, color_scheme, yscale=1, ax=None):
+def letter_at(letter, x, y, letters, color_scheme, yscale=1, ax=None):
     text = letters[letter]
     t = mpl.transforms.Affine2D().scale(1 * globscale, yscale * globscale) + \
         mpl.transforms.Affine2D().translate(x, y) + ax.transData
@@ -95,6 +97,7 @@ def aa_color(letter):
     else:
         return 'black'
 
+
 def nuc_color(letter):
     if letter in ['C']:
         return 'firebrick'
@@ -108,6 +111,10 @@ def nuc_color(letter):
         return 'black'
     else:
         return 'black'
+
+
+def generic_color(index):
+    return ['firebrick', 'tomato', 'mediumpurple', 'slateblue', 'black', 'grey', 'blue', 'red', 'green'][index]
 
 
 def build_scores(matrix, base_list, epsilon=1e-4):
@@ -192,43 +199,38 @@ def build_scores2_break(matrix, selected, base_list):
     maxi_size = np.abs(matrix).sum(-1).max()
     return all_scores, maxi_size
 
-# Needed to generate Sequence Logos
 
+# Needed to generate Sequence Logos
 fp = FontProperties(family="Arial", weight="bold")
 globscale = 1.35
-aa_to_dna = {'A': 'A', 'C': 'C', 'D': 'G', 'E': 'T', 'F': '$\\boxminus$'}
-aa_to_rna = {'A': 'A', 'C': 'C', 'D': 'G', 'E': 'U', 'F': '$\\boxminus$'}
-
-list_dna = ['A', 'C', 'G', 'T', '$\\boxminus$']
-list_rna = ['A', 'C', 'G', 'U', '$\\boxminus$']
-list_aa = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y', '$\\boxminus$']
-base_list_master = {"dna": list_dna, "rna": list_rna, "protein": list_aa}
 
 
+def graph_data(alphabet):
+    alphabet_dict = get_alphabet(alphabet, clean=True)
+    # color scheme
+    if alphabet is str:  # preset alphabets
+        if alphabet == "protein":
+            color_scheme = dict([(letter, aa_color(letter)) for letter in alphabet_dict.keys()])
+        else:
+            color_scheme = dict([(letter, nuc_color(letter)) for letter in alphabet_dict.keys()])
+    # generic alphabet
+    else:
+        color_scheme = dict([(letter, generic_color(index)) for letter, index in alphabet_dict.items()])
 
-LETTERSaa = dict([(letter, TextPath((-0.30, 0), letter, size=1, prop=fp)) for letter in list_aa])
-LETTERSdna = dict([(letter, TextPath((-0.30, 0), letter, size=1, prop=fp)) for letter in list_dna])
-LETTERSrna = dict([(letter, TextPath((-0.30, 0), letter, size=1, prop=fp)) for letter in list_rna])
+    letters = [x if x != '-' else '$\\boxminus$' for x in alphabet_dict.keys()]
+    letters_graph = dict([(letter, TextPath((-0.30, 0), letter, size=1, prop=fp)) for letter in letters])
+    return letters, letters_graph, color_scheme
 
 
-COLOR_SCHEME_PROTEIN = dict([(letter, aa_color(letter)) for letter in list_aa])
-COLOR_SCHEME_DNA = dict([(letter, nuc_color(letter)) for letter in list_dna])
-COLOR_SCHEME_RNA = dict([(letter, nuc_color(letter)) for letter in list_rna])
-
-LETTERS = {"protein": LETTERSaa, "dna": LETTERSdna, "rna": LETTERSrna}
-COLOR_SCHEME = {"protein": COLOR_SCHEME_PROTEIN, "dna": COLOR_SCHEME_DNA, "rna": COLOR_SCHEME_RNA}
-
-
-def Sequence_logo(matrix, ax=None, data_type=None, figsize=None, ylabel=None, title=None, epsilon=1e-4, show=True, ticks_every=1, ticks_labels_size=14, title_size=20, molecule='protein'):
+def sequence_logo(matrix, ax=None, data_type=None, figsize=None, ylabel=None, title=None, epsilon=1e-4,
+                  show=True, ticks_every=1, ticks_labels_size=14, title_size=20, alphabet='protein'):
     if data_type is None:
         if matrix.min() >= 0:
             data_type = 'mean'
         else:
             data_type = 'weights'
 
-    base_list = base_list_master[molecule]
-    color_scheme = COLOR_SCHEME[molecule]
-    letters = LETTERS[molecule]
+    base_list, letters, color_scheme = get_alphabet(alphabet)
 
     if data_type == 'mean':
         all_scores = build_scores(matrix, base_list, epsilon=epsilon)
@@ -255,7 +257,7 @@ def Sequence_logo(matrix, ax=None, data_type=None, figsize=None, ylabel=None, ti
             y = 0
             for base, score in scores:
                 if score > 0.01:
-                    letterAt(base, x, y, letters, color_scheme, yscale=score, ax=ax)
+                    letter_at(base, x, y, letters, color_scheme, yscale=score, ax=ax)
                 y += score
             x += 1
             maxi = max(maxi, y)
@@ -266,11 +268,11 @@ def Sequence_logo(matrix, ax=None, data_type=None, figsize=None, ylabel=None, ti
             y_neg = 0
             for base, score, sign in scores:
                 if sign == '+':
-                    letterAt(base, x, y_pos, letters, color_scheme, yscale=score, ax=ax)
+                    letter_at(base, x, y_pos, letters, color_scheme, yscale=score, ax=ax)
                     y_pos += score
                 else:
                     y_neg += score
-                    letterAt(base, x, -y_neg, letters, color_scheme, yscale=score, ax=ax)
+                    letter_at(base, x, -y_neg, letters, color_scheme, yscale=score, ax=ax)
             x += 1
             maxi = max(y_pos, maxi)
             mini = min(-y_neg, mini)
@@ -308,7 +310,9 @@ def Sequence_logo(matrix, ax=None, data_type=None, figsize=None, ylabel=None, ti
         return fig
 
 
-def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_important=0.25, figsize=None, nrows=1, ylabel=None, title=None, epsilon=1e-4, show=True, ticks_every=5, ticks_labels_size=14, title_size=20, molecule='protein'):
+def sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_important=0.25, figsize=None,
+                         nrows=1, ylabel=None, title=None, epsilon=1e-4, show=True, ticks_every=5, ticks_labels_size=14,
+                         title_size=20, alphabet='protein'):
     if data_type is None:
         if matrix.min() >= 0:
             data_type = 'mean'
@@ -325,11 +329,9 @@ def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
         selected = np.array(selected)
     print('Number of sites selected: %s' % len(selected))
 
-    xticks, xticks_labels = ticksAt(selected, ticks_every=ticks_every)
+    xticks, xticks_labels = ticks_at(selected, ticks_every=ticks_every)
 
-    base_list = base_list_master[molecule]
-    color_scheme = COLOR_SCHEME[molecule]
-    letters = LETTERS[molecule]
+    base_list, letters, color_scheme = get_alphabet(alphabet)
 
     if data_type == 'mean':
         all_scores, maxi_size = build_scores_break(matrix, selected, base_list, epsilon=epsilon)
@@ -368,7 +370,7 @@ def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
         if data_type == 'mean':
             y = 0
             if scores[0][0] == 'BREAK':
-                breaksAt(x, maxi_size, ax_)
+                breaks_at(x, maxi_size, ax_)
                 if nrows > 1:
                     if x > (1 + row) * width:
                         xmaxs[row] = copy.copy(x) + 1
@@ -378,7 +380,7 @@ def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
             else:
                 for base, score in scores:
                     if score > 0.01:
-                        letterAt(base, x, y, letters, color_scheme, yscale=score, ax=ax_)
+                        letter_at(base, x, y, letters, color_scheme, yscale=score, ax=ax_)
                     y += score
                 x += 1
                 maxi = max(maxi, y)
@@ -388,7 +390,7 @@ def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
             y_pos = 0
             y_neg = 0
             if scores[0][0] == 'BREAK':
-                breaksAt(x, maxi_size, ax_)
+                breaks_at(x, maxi_size, ax_)
                 if nrows > 1:
                     if x > (1 + row) * width:
                         xmaxs[row] = copy.copy(x) + 1
@@ -399,11 +401,11 @@ def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
             else:
                 for base, score, sign in scores:
                     if sign == '+':
-                        letterAt(base, x, y_pos, letters, color_scheme, yscale=score, ax=ax_)
+                        letter_at(base, x, y_pos, letters, color_scheme, yscale=score, ax=ax_)
                         y_pos += score
                     else:
                         y_neg += score
-                        letterAt(base, x, -y_neg, letters, color_scheme, yscale=score, ax=ax_)
+                        letter_at(base, x, -y_neg, letters, color_scheme, yscale=score, ax=ax_)
             x += 1
             maxi = max(y_pos, maxi)
             mini = min(-y_neg, mini)
@@ -464,7 +466,9 @@ def Sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
     return fig, selected
 
 
-def Sequence_logo_multiple(matrix, data_type=None, figsize=None, ylabel=None, title=None, epsilon=1e-4, ncols=1, show=True, count_from=0, ticks_every=1, ticks_labels_size=14, title_size=20, molecule='protein'):
+def sequence_logo_multiple(matrix, data_type=None, figsize=None, ylabel=None, title=None, epsilon=1e-4, ncols=1,
+                           show=True, count_from=0, ticks_every=1, ticks_labels_size=14, title_size=20,
+                           alphabet='protein'):
     if data_type is None:
         if matrix.min() >= 0:
             data_type = 'mean'
@@ -499,8 +503,9 @@ def Sequence_logo_multiple(matrix, data_type=None, figsize=None, ylabel=None, ti
     for i in range(N_plots):
         ax_ = get_ax(ax, i, nrows, ncols)
 
-        Sequence_logo(matrix[i], ax=ax_, data_type=data_type, ylabel=ylabels[i], title=titles[i],
-                      epsilon=epsilon, show=False, ticks_every=ticks_every, ticks_labels_size=ticks_labels_size, title_size=title_size, molecule=molecule)
+        sequence_logo(matrix[i], ax=ax_, data_type=data_type, ylabel=ylabels[i], title=titles[i],
+                      epsilon=epsilon, show=False, ticks_every=ticks_every, ticks_labels_size=ticks_labels_size,
+                      title_size=title_size, alphabet=alphabet)
 
     plt.tight_layout()
     if show:
@@ -508,7 +513,9 @@ def Sequence_logo_multiple(matrix, data_type=None, figsize=None, ylabel=None, ti
     return fig
 
 
-def Sequence_logo_all(matrix, name='all_Sequence_logo.pdf', nrows=5, ncols=2, data_type=None, figsize=None, ylabel=None, title=None, epsilon=1e-4, ticks_every=5, ticks_labels_size=14, title_size=20, dpi=100, molecule='protein'):
+def sequence_logo_all(matrix, name='all_Sequence_logo.pdf', nrows=5, ncols=2, data_type=None, figsize=None, ylabel=None,
+                      title=None, epsilon=1e-4, ticks_every=5, ticks_labels_size=14, title_size=20, dpi=100,
+                      alphabet='protein'):
     if data_type is None:
         if matrix.min() >= 0:
             data_type = 'mean'
@@ -529,8 +536,10 @@ def Sequence_logo_all(matrix, name='all_Sequence_logo.pdf', nrows=5, ncols=2, da
             title_ = title[i * plots_per_page:min(plots_per_page * (i + 1), n_plots)]
         else:
             title_ = title
-        fig = Sequence_logo_multiple(matrix[plots_per_page * i:min(plots_per_page * (i + 1), n_plots)], data_type=data_type, figsize=figsize, ylabel=ylabel_, title=title_, epsilon=epsilon, ncols=ncols, show=False, count_from=plots_per_page * i, ticks_every=ticks_every,
-                                     ticks_labels_size=ticks_labels_size, title_size=title_size, molecule=molecule)
+        fig = sequence_logo_multiple(matrix[plots_per_page * i:min(plots_per_page * (i + 1), n_plots)],
+                                     data_type=data_type, figsize=figsize, ylabel=ylabel_, title=title_, epsilon=epsilon,
+                                     ncols=ncols, show=False, count_from=plots_per_page * i, ticks_every=ticks_every,
+                                     ticks_labels_size=ticks_labels_size, title_size=title_size, alphabet=alphabet)
         file = f"tmp_{rng}_#{i}.jpg"
         fig.savefig(mini_name + file, dpi=dpi)
         fig.clear()

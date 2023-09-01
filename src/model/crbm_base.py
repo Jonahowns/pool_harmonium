@@ -48,7 +48,6 @@ class CRBM(Base_drelu):
         self.lcorr = config['lcorr']  # regularization on correlation of weights
         ###########################################
         self.lkd = config['lkd']
-        self.kl_div = torch.nn.KLDivLoss(log_target=True, reduction='none')
 
         self.convolution_topology = config["convolution_topology"]
 
@@ -58,14 +57,11 @@ class CRBM(Base_drelu):
             self.register_parameter("fields", nn.Parameter(torch.zeros((self.v_num, self.q), device=self.device)))
             self.register_parameter("fields0", nn.Parameter(torch.zeros((self.v_num, self.q), device=self.device)))
         elif type(self.v_num) is tuple:# Normal dist. times this value sets initial weight values
-
             self.weight_intial_amplitude = np.sqrt(0.1 / math.prod(list(self.v_num)))
             self.register_parameter("fields", nn.Parameter(torch.zeros((*self.v_num, self.q), device=self.device)))
             self.register_parameter("fields0", nn.Parameter(torch.zeros((*self.v_num, self.q), device=self.device)))
 
         self.hidden_convolution_keys = list(self.convolution_topology.keys())
-
-        # self.register_parameter("hidden_layer_W", nn.Parameter(torch.ones((len(self.hidden_convolution_keys)), device=self.device), requires_grad=True))
 
         for key in self.hidden_convolution_keys:
             # Set information about the convolutions that will be useful
@@ -86,21 +82,9 @@ class CRBM(Base_drelu):
             self.register_parameter(f"{key}_0gamma+", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
             self.register_parameter(f"{key}_0gamma-", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
 
-        self.ind_temp_schedule = self.init_temp_schedule(config["ind_temp"])
-        self.seq_temp_schedule = self.init_temp_schedule(config["seq_temp"])
-
         # Saves Our hyperparameter options into the checkpoint file generated for Each Run of the Model
         # i. e. Simplifies loading a model that has already been run
         self.save_hyperparameters()
-
-        # Constants for faster math
-        self.logsqrtpiover2 = torch.tensor(0.2257913526, device=self.device, requires_grad=False)
-        self.pbis = torch.tensor(0.332672, device=self.device, requires_grad=False)
-        self.a1 = torch.tensor(0.3480242, device=self.device, requires_grad=False)
-        self.a2 = torch.tensor(- 0.0958798, device=self.device, requires_grad=False)
-        self.a3 = torch.tensor(0.7478556, device=self.device, requires_grad=False)
-        self.invsqrt2 = torch.tensor(0.7071067812, device=self.device, requires_grad=False)
-        self.sqrt2 = torch.tensor(1.4142135624, device=self.device, requires_grad=False)
     
         # Initialize PT members
         if self.sample_type == "pt":
@@ -111,128 +95,34 @@ class CRBM(Base_drelu):
                 sys.exit(1)
             self.initialize_PT(self.N_PT, n_chains=None, record_acceptance=True, record_swaps=True)
 
-        self.meminfo = meminfo
-
-
     @property
     def h_layer_num(self):
         return len(self.hidden_convolution_keys)
-
-    ############################################################# CRBM Functions
-    ## Compute Psuedo likelihood of given visible config
-    # TODO: Figure this out
-    # Currently gives wrong values
-    # def pseudo_likelihood(self, v):
-    #     with torch.no_grad():
-    #         categorical = v.argmax(2)
-    #         ind_x = torch.arange(categorical.shape[0], dtype=torch.long, device=self.device)
-    #         ind_y = torch.randint(self.v_num, (categorical.shape[0],), dtype=torch.long, device=self.device)  # high, shape tuple, needs size, low=0 by default
-    #
-    #         E_vlayer_ref = self.energy_v(v) + getattr(self, "fields")[ind_y, categorical[ind_x, ind_y]]
-    #
-    #         v_output = self.compute_output_v(v)
-    #
-    #         fe = torch.zeros([categorical.shape[0], self.q], device=self.device)
-    #         zero_state = torch.zeros(v.shape, device=self.device)
-    #
-    #         # ind_tks = []
-    #         v_shuffle_output = []
-    #         output_ref = []
-    #         ind_ks = []
-    #         shuffle_indx = []
-    #         for iid, i in enumerate(self.hidden_convolution_keys):
-    #             # Will fill this at correct indices to make corresponding layer
-    #             zeros = torch.zeros(v_output[iid].shape, dtype=torch.double, device=self.device)
-    #
-    #             # Corrupted shuffle index
-    #             shuffle_indx.append(torch.randint(v_output[iid].shape[2], v_output[iid].shape, dtype=torch.long, device=self.device))
-    #             v_output_shuffled = v_output[iid].gather(2, shuffle_indx[iid])
-    #
-    #             # Random k for each huk
-    #             ind_ks.append(torch.randint(v_output_shuffled.shape[2], v_output_shuffled.shape[:2], device=self.device).unsqueeze(2))
-    #
-    #             # huks with random huk values filled
-    #             v_shuffle_output.append(zeros.scatter(2, ind_ks[iid], v_output_shuffled))
-    #
-    #             output_ref.append(v_output[iid] - v_shuffle_output[iid])
-    #
-    #         for c in range(self.q):
-    #             E_vlayer = E_vlayer_ref - getattr(self, "fields")[ind_y, c]
-    #
-    #             rc_state = zero_state.clone()
-    #             rc_state[:, :, c] = 1
-    #             rc_output = self.compute_output_v(rc_state)
-    #             rc_shuffled = []
-    #             output = []
-    #             for iid, i in enumerate(self.hidden_convolution_keys):
-    #                 # Re use stored shuffle index
-    #                 rc_shuffled.append(rc_output[iid].gather(2, shuffle_indx[iid]))
-    #                 # Extract only 1 huk value per huk
-    #                 rc_out_single = zeros.scatter(2, ind_ks[iid], rc_shuffled[iid])
-    #                 output.append(output_ref[iid] + rc_out_single)
-    #
-    #
-    #             fe[:, c] += E_vlayer - self.logpartition_h(output)
-    #
-    #         fe_estimate = fe.gather(1, categorical[ind_x, ind_y].unsqueeze(1)).squeeze(1)
-    #
-    #         # To shuffle our visible states
-    #         # ind_k = torch.randint(self.v_num, (self.v_num, ), dtype=torch.long, device=self.device)
-    #
-    #         # # Shuffle all h_uk
-    #         # shuffle_indx = torch.randint(v_output[iid].shape[2], v_output[iid].shape, dtype=torch.long, device=self.device)
-    #         # v_shuffle_output.append(v_output[iid].gather(2, shuffle_indx))
-    #
-    #         # First attempt, shuffling of visible nodes
-    #         # v_shuffle = v.clone()[:, ind_k, :]
-    #         # v_shuffle_output = self.compute_output_v(v_shuffle)
-    #
-    #         # for iid, i in enumerate(self.hidden_convolution_keys):
-    #         #     output_ref.append(v_output[iid] - v_shuffle_output[iid])
-    #         # output_ref = self.compute_output_v(v) - random_config_output
-    #
-    #         # # Original try
-    #         # for c in range(self.q):
-    #         #     random_config_state = zero_state.clone()
-    #         #     random_config_state[:, :, c] = 1
-    #         #     random_config_state_output = self.compute_output_v(random_config_state)
-    #         #
-    #         #     E_vlayer = E_vlayer_ref - getattr(self, "fields")[ind_y, c]
-    #         #
-    #         #     output = []
-    #         #     for iid, i in enumerate(self.hidden_convolution_keys):
-    #         #         output.append(output_ref[iid] + random_config_state_output[iid])
-    #         #
-    #         #     fec = E_vlayer - self.logpartition_h(output)
-    #         #     fe[:, c] += fec
-    #         #
-    #         # fe_estimate = fe.gather(1, categorical[ind_x, ind_y].unsqueeze(1)).squeeze(1)
-    #
-    #     return - fe_estimate - torch.logsumexp(- fe, 1)
 
     ## Used in our Loss Function
     def free_energy(self, v):
         return self.energy_v(v) - self.logpartition_h(self.compute_output_v(v))
 
+    # Free energy contribution for each hidden node
     def free_energy_ind(self, v):
         return self.energy_v(v).unsqueeze(1) - self.logpartition_h_ind(self.compute_output_v(v))
 
-    ## Not used but may be useful
+    # Not used but may be useful
     def free_energy_h(self, h):
         return self.energy_h(h) - self.logpartition_v(self.compute_output_h(h))
 
-    ## Total Energy of a given visible and hidden configuration
+    # Energy of a given visible and hidden configuration
     def energy(self, v, h, remove_init=False, hidden_sub_index=-1):
         return self.energy_v(v, remove_init=remove_init) + self.energy_h(h, sub_index=hidden_sub_index, remove_init=remove_init) - self.bidirectional_weight_term(v, h, hidden_sub_index=hidden_sub_index)
 
+    # energy for N_PT configurations
     def energy_PT(self, v, h, N_PT, remove_init=False):
-        # if N_PT is None:
-        #     N_PT = self.N_PT
         E = torch.zeros((N_PT, v.shape[1]), device=self.device)
         for i in range(N_PT):
             E[i] = self.energy_v(v[i], remove_init=remove_init) + self.energy_h(h, sub_index=i, remove_init=remove_init) - self.bidirectional_weight_term(v[i], h, hidden_sub_index=i)
         return E
 
+    # h*v
     def bidirectional_weight_term(self, v, h, hidden_sub_index=-1):
         conv = self.compute_output_v(v)
         E = torch.zeros((len(self.hidden_convolution_keys), conv[0].shape[0]), device=self.device)
@@ -251,7 +141,6 @@ class CRBM(Base_drelu):
     ############################################################# Individual Layer Functions
     def transform_v(self, I):
         return F.one_hot(torch.argmax(I + getattr(self, "fields").unsqueeze(0), dim=-1), self.q)
-        # return self.one_hot_tmp.scatter(2, torch.argmax(I + getattr(self, "fields").unsqueeze(0), dim=-1).unsqueeze(-1), 1.)
 
     def transform_h(self, I):
         output = []
@@ -267,7 +156,7 @@ class CRBM(Base_drelu):
             output.append(tmp)
         return output
 
-    ## Computes g(si) term of potential
+    # Computes g(si) term of potential
     def energy_v(self, config, remove_init=False):
         # config is a one hot vector
         v = config.type(torch.get_default_dtype())
@@ -280,7 +169,7 @@ class CRBM(Base_drelu):
 
         return E
 
-    ## Computes U(h) term of potential
+    # Computes U(h) term of potential
     def energy_h(self, config, remove_init=False, sub_index=-1):
         # config is list of h_uks
         if sub_index != -1:
@@ -317,7 +206,7 @@ class CRBM(Base_drelu):
         else:
             return E.squeeze(0)
 
-    ## Random Config of Visible Potts States
+    # Random Config of Visible Potts States
     def random_init_config_v(self, custom_size=False, zeros=False):
         if custom_size:
             size = (*custom_size, self.v_num, self.q)
@@ -348,6 +237,7 @@ class CRBM(Base_drelu):
 
         return config
 
+    # create copy of hidden configuration
     def clone_h(self, hidden_config, reduce_dims=[], expand_dims=[], sub_index=-1):
         new_config = []
         for hc in hidden_config:
@@ -362,7 +252,7 @@ class CRBM(Base_drelu):
             new_config.append(new_h)
         return new_config
 
-    ## Marginal over hidden units
+    # Marginal over hidden units
     def logpartition_h(self, inputs, beta=1):
         # Input is list of matrices I_uk
         marginal = torch.zeros((len(self.hidden_convolution_keys), inputs[0].shape[0]), device=self.device)
@@ -380,11 +270,10 @@ class CRBM(Base_drelu):
             y = torch.logaddexp(self.log_erf_times_gauss((-inputs[iid] + theta_plus) / torch.sqrt(a_plus)) -
                                 0.5 * torch.log(a_plus), self.log_erf_times_gauss((inputs[iid] + theta_minus) / torch.sqrt(a_minus)) - 0.5 * torch.log(a_minus)).sum(
                     1) + 0.5 * np.log(2 * np.pi) * inputs[iid].shape[1]
-            marginal[iid] = y.sum(1)  # 10 added so hidden layer has stronger effect on free energy, also in energy_h
-            # marginal[iid] /= self.convolution_topology[i]["convolution_dims"][2]
+            marginal[iid] = y.sum(1)
         return marginal.sum(0)
 
-    ## Marginal over visible units
+    # Marginal over visible units
     def logpartition_v(self, inputs, beta=1):
         if beta == 1:
             return torch.logsumexp(getattr(self, "fields")[None, :, :] + inputs, 2).sum(1)

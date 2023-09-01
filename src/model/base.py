@@ -46,7 +46,7 @@ class Base(LightningModule):
 
         # Data Input Options #
         ###########################################
-        self.fasta_file = config['fasta_file']
+        self.fasta_file = config['fasta_file']  # list of data files
         self.v_num = config['v_num']  # Number of visible nodes
         self.q = config['q']  # Number of categories the input sequence has (ex. DNA:4 bases + 1 gap)
 
@@ -56,18 +56,16 @@ class Base(LightningModule):
         assert self.test_size < 1.0
 
         self.molecule = config['molecule']  # can be protein, rna or dna currently
-        assert self.molecule in ["dna", "rna", "protein"]
 
-
-        # Sequence Weighting Weights
+        # Sequence Weighting
         # Not pretty but necessary to either provide the weights or to import from the fasta file
-        # To import from the provided fasta file weights="fasta" in intialization of RBM
+        # To import from the provided fasta file weights="fasta" in initialization of RBM
         weights = config['sequence_weights']
         self.weights = process_weights(weights)
 
         # Dataloader Configuration Options #
         ###########################################
-        # Sets worker number for both dataloaders
+        # Sets worker number for dataloaders
         if debug:
             self.worker_num = 0
         else:
@@ -87,13 +85,13 @@ class Base(LightningModule):
             self.pin_mem = False
         ###########################################
 
-
         # Global Optimizer Settings #
         ###########################################
         # configure optimizer
         optimizer = config['optimizer']
         self.optimizer = configure_optimizer(optimizer)
 
+        # learning rate and final learning rate (decays exponentially)
         self.lr = config['lr']
         lr_final = config['lr_final']
 
@@ -102,15 +100,16 @@ class Base(LightningModule):
         else:
             self.lrf = lr_final
 
-        self.wd = config['weight_decay']  # Put into weight decay option in configure_optimizer, l2 regularizer
-        self.decay_after = config['decay_after']  # hyperparameter for when the lr decay should occur
+        # Put into weight decay option in configure_optimizer, l2 regularizer
+        self.wd = config['weight_decay']
+        # hyperparameter for when the lr decay should occur, value b/t 0 and 1
+        self.decay_after = config['decay_after']
 
         # Labels for stratified sampling of datasets
         try:
             self.label_groups = config["label_groups"]
         except KeyError:
             self.label_groups = 1
-
 
         if self.label_groups > 1:
             try:
@@ -127,25 +126,26 @@ class Base(LightningModule):
         except KeyError:
             self.group_fraction = [1 / self.label_groups for i in range(self.label_groups)]
 
+        # controls number of batches of sampled sequences, used for weighted
         try:
             self.sample_multiplier = config["sample_multiplier"]
         except KeyError:
             self.sample_multiplier = 1.
 
-        # Batch sampling strategy, can be random or stratified
+        # Batch sampling strategy
         try:
             self.sampling_strategy = config["sampling_strategy"]
         except KeyError:
             self.sampling_strategy = "random"
-        assert self.sampling_strategy in ["random", "stratified", "weighted", "stratified_weighted", "polar"]
+        assert self.sampling_strategy in ["random", "stratified", "weighted", "stratified_weighted"]
 
-        # Only used is sampling strategy is weighted
+        # Only used if sampling strategy is weighted
         try:
             self.sampling_weights = config["sampling_weights"]
         except KeyError:
             self.sampling_weights = None
 
-        # Stratify the datasets, training, validationa, and test
+        # Stratify the datasets, training, validation, and test
         try:
             self.stratify = config["stratify_datasets"]
         except KeyError:
@@ -154,11 +154,8 @@ class Base(LightningModule):
         self.training_data_logs = []
         self.val_data_logs = []
 
-
-
-    ## Loads Data to be trained from provided fasta file
+    # Loads Data to be trained from provided fasta file
     def setup(self, stage=None):
-        self.additional_data = False
         if type(self.fasta_file) is str:
             self.fasta_file = [self.fasta_file]
 
@@ -171,18 +168,19 @@ class Base(LightningModule):
                     threads = 1
                 else:
                     threads = self.worker_num
-                seqs, seq_read_counts, all_chars, q_data = fasta_read(file, self.molecule, drop_duplicates=False, threads=threads)
+                seqs, seq_read_counts, all_chars, q_data = fasta_read(file, self.molecule,
+                                                                      drop_duplicates=False, threads=threads)
             except IOError:
                 print(f"Provided Fasta File '{file}' Not Found")
                 print(f"Current Directory '{os.getcwd()}'")
-                sys.exit()
+                sys.exit(1)
 
             if q_data != self.q:
                 print(
-                    f"State Number mismatch! Expected q={self.q}, in dataset q={q_data}. All observed chars: {all_chars}")
-                sys.exit(-1)
+                    f"State Number mismatch! Expected q={self.q}, in dataset q={q_data}. "
+                    f"All observed chars: {all_chars}")
+                sys.exit(1)
 
-            # seq_read_counts = np.asarray([math.log(x + 1.0, math.e) for x in seq_read_counts])
             data = pd.DataFrame(data={'sequence': seqs, 'fasta_count': seq_read_counts})
 
             if type(self.weights) == str and "fasta" in self.weights:
@@ -208,17 +206,20 @@ class Base(LightningModule):
             label_df = all_data[all_data["label"] == i]
             if self.test_size > 0.:
                 # Split label df into train and test sets, taking into account duplicates
-                not_test_inds, test_inds = next(GroupShuffleSplit(test_size=self.test_size, n_splits=1, random_state=self.seed).split(label_df, groups=label_df['sequence']))
+                not_test_inds, test_inds = next(GroupShuffleSplit(test_size=self.test_size, n_splits=1,
+                                                                  random_state=self.seed).split(label_df, groups=label_df['sequence']))
                 test_sets += label_df.index[test_inds].to_list()
 
                 # Further split training set into train and test set
-                train_inds, val_inds = next(GroupShuffleSplit(test_size=self.validation_size, n_splits=1, random_state=self.seed).split(label_df.iloc[not_test_inds], groups=label_df.iloc[not_test_inds]['sequence']))
+                train_inds, val_inds = next(GroupShuffleSplit(test_size=self.validation_size, n_splits=1,
+                                                              random_state=self.seed).split(label_df.iloc[not_test_inds], groups=label_df.iloc[not_test_inds]['sequence']))
                 train_sets += label_df.iloc[not_test_inds].index[train_inds].to_list()
                 val_sets += label_df.iloc[not_test_inds].index[val_inds].to_list()
 
             else:
                 # Split label df into train and validation sets, taking into account duplicates
-                train_inds, val_inds = next(GroupShuffleSplit(test_size=self.validation_size, n_splits=1, random_state=self.seed).split(label_df, groups=label_df['sequence']))
+                train_inds, val_inds = next(GroupShuffleSplit(test_size=self.validation_size, n_splits=1,
+                                                              random_state=self.seed).split(label_df, groups=label_df['sequence']))
                 train_sets += label_df.index[train_inds].to_list()
                 val_sets += label_df.index[val_inds].to_list()
 
@@ -228,8 +229,8 @@ class Base(LightningModule):
         if self.sampling_weights is not None:
             if self.sampling_weights == "fasta":
                 self.sampling_weights = np.exp(all_data["fasta_count"].to_numpy())
-            self.sampling_weights = self.sampling_weights[train_sets]
 
+            self.sampling_weights = self.sampling_weights[train_sets]
             self.sampling_weights = torch.tensor(self.sampling_weights)
 
         self.dataset_indices = {"train_indices": train_sets, "val_indices": val_sets}
@@ -238,29 +239,30 @@ class Base(LightningModule):
             self.dataset_indices["test_indices"] = test_sets
 
     def on_train_start(self):
-        # Log which sequences belong to each dataset
+        # Log which sequences belong to each dataset, same order as fasta file
         with open(self.logger.log_dir + "/dataset_indices.json", "w") as f:
             json.dump(self.dataset_indices, f)
 
-    ## Sets Up Optimizer as well as Exponential Weight Decasy
+    # Sets Up Optimizer as well as Exponential Weight Decay
     def configure_optimizers(self):
         optim = self.optimizer(self.parameters(), lr=self.lr, weight_decay=self.wd)
         # Exponential Weight Decay after set amount of epochs (set by decay_after)
         decay_gamma = (self.lrf / self.lr) ** (1 / (self.epochs * (1 - self.decay_after)))
         decay_milestone = math.floor(self.decay_after * self.epochs)
-        my_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optim, milestones=[decay_milestone], gamma=decay_gamma)
+        my_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optim,
+                                                               milestones=[decay_milestone], gamma=decay_gamma)
         optim_dict = {"lr_scheduler": my_lr_scheduler,
                       "optimizer": optim}
         return optim_dict
 
-    ## Loads Training Data
+    # Loads Training Data
     def train_dataloader(self, init_fields=False):
         training_weights = None
         if "seq_count" in self.training_data.columns:
             training_weights = self.training_data["seq_count"].tolist()
 
         train_reader = Categorical(self.training_data, self.q, weights=training_weights, max_length=self.v_num,
-                                   molecule=self.molecule, device=self.device, one_hot=True, labels=False)
+                                   molecule=self.molecule, device=self.device, one_hot=True)
         # Init Fields
         if init_fields:
             if hasattr(self, "fields"):
@@ -282,7 +284,7 @@ class Base(LightningModule):
                 train_reader,
                 batch_sampler=StratifiedBatchSampler(self.training_data["label"].to_numpy(), batch_size=self.batch_size,
                                                      shuffle=True, seed=self.seed),
-                num_workers=self.worker_num,  # Set to 0 if debug = True
+                num_workers=self.worker_num,
                 pin_memory=self.pin_mem
             )
         elif self.sampling_strategy == "weighted":
@@ -297,7 +299,7 @@ class Base(LightningModule):
             return torch.utils.data.DataLoader(
                 train_reader,
                 batch_sampler=WeightedSubsetRandomSampler(self.sampling_weights, self.training_data["label"].to_numpy(), self.group_fraction, self.batch_size, self.sample_multiplier),
-                num_workers=self.worker_num,  # Set to 0 if debug = True
+                num_workers=self.worker_num,
                 pin_memory=self.pin_mem
             )
         else:
@@ -305,7 +307,7 @@ class Base(LightningModule):
             return torch.utils.data.DataLoader(
                 train_reader,
                 batch_size=self.batch_size,
-                num_workers=self.worker_num,  # Set to 0 if debug = True
+                num_workers=self.worker_num,
                 pin_memory=self.pin_mem,
                 shuffle=True
             )
@@ -317,7 +319,7 @@ class Base(LightningModule):
             validation_weights = self.validation_data["seq_count"].tolist()
 
         val_reader = Categorical(self.validation_data, self.q, weights=validation_weights, max_length=self.v_num,
-                                 molecule=self.molecule, device=self.device, one_hot=True, labels=None, additional_data=None)
+                                 molecule=self.molecule, device=self.device, one_hot=True, additional_data=None)
 
         if self.sampling_strategy == "stratified":
             return torch.utils.data.DataLoader(
@@ -336,6 +338,7 @@ class Base(LightningModule):
             )
 
     def on_validation_epoch_end(self):
+        # log values to tensorboard
         result_dict = {}
         for key in self.val_data_logs[0].keys():
             result_dict[key] = torch.stack([x[key] for x in self.val_data_logs]).mean()
@@ -354,10 +357,12 @@ class Base(LightningModule):
                 try:
                     result_dict[key] = torch.stack([x[key] for x in self.training_data_logs]).mean()
                 except RuntimeError:
-                    print('sup bitch')
+                    print('Logging Problems in "on_train_epoch_end"')
 
+        # log values to tensorboard
         self.logger.experiment.add_scalars("Train Scalars", result_dict, self.current_epoch)
 
+        # log model parameters
         for name, p in self.named_parameters():
             self.logger.experiment.add_histogram(name, p.detach(), self.current_epoch)
 
@@ -365,7 +370,7 @@ class Base(LightningModule):
             
 
 # class that extends base class for any of our rbm/crbm models
-class Base_drelu(Base):
+class BaseRelu(Base):
     def __init__(self, config, debug=False, precision="double"):
         super().__init__(config, debug=debug, precision=precision)
         self.dr = 0.
@@ -391,30 +396,7 @@ class Base_drelu(Base):
             sys.exit(1)
 
     # Initializes Members for both PT and gen_data functions
-    def initialize_PT(self, N_PT, n_chains=None, record_acceptance=False, record_swaps=False):
-        self.record_acceptance = record_acceptance
-        self.record_swaps = record_swaps
 
-        # self.update_betas()
-        self.betas = torch.arange(N_PT) / (N_PT - 1)
-        self.betas = self.betas.flip(0)
-
-        if n_chains is None:
-            n_chains = self.batch_size
-
-        self.particle_id = [torch.arange(N_PT).unsqueeze(1).expand(N_PT, n_chains)]
-
-        # if self.record_acceptance:
-        self.mavar_gamma = 0.95
-        self.acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
-        self.mav_acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
-
-        # gen data
-        self.count_swaps = 0
-        self.last_at_zero = None
-        self.trip_duration = None
-        # self.update_betas_lr = 0.1
-        # self.update_betas_lr_decay = 1
 
     ## Hidden dReLU supporting Function
     def erf_times_gauss(self, X):  # This is the "characteristic" function phi

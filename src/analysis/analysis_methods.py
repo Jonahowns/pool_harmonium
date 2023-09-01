@@ -333,7 +333,7 @@ def view_weights(rbm, type="top", selected=None, molecule="protein", title=None,
     if remove_gaps:
         selected_weights[:, :, -1] = 0.
     # Assume we want weights
-    fig = utils.Sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
+    fig = utils.sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
 
 
 def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="protein", title=None, view="full", ax=None):
@@ -363,7 +363,7 @@ def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="pro
         selected_weights = np.minimum(selected_weights, 0.)
 
     # Assume we want weights
-    fig = utils.Sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
+    fig = utils.sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
 
 
 def dataframe_to_input(dataframe, base_to_id, v_num, weights=False):
@@ -409,7 +409,7 @@ def cgf_with_weights_plot(rbm, dataframe, hidden_unit_numbers):
     for hid, hu_num in enumerate(hidden_unit_numbers):
         ix = order[hu_num]  # get weight index
         # Make Sequence Logo
-        utils.Sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule='protein')
+        utils.sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule='protein')
 
         t_x = np.asarray(fullranges[:, ix])
         t_y = np.asarray(pre_cgf[:, ix])

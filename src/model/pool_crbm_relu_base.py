@@ -21,7 +21,7 @@ from rbm_torch.utils.utils import Categorical, conv2d_dim
 from torch.utils.data import WeightedRandomSampler
 from rbm_torch.models.base import Base_drelu
 
-class pool_CRBM_relu(Base_drelu):
+class pool_crbm_relu(Base_drelu):
     def __init__(self, config, debug=False, precision="double", meminfo=False):
         super().__init__(config, debug=debug, precision=precision)
 
@@ -43,7 +43,6 @@ class pool_CRBM_relu(Base_drelu):
         self.lcorr = config['lcorr']  # regularization on correlation of weights
         ###########################################
         self.lkd = config['lkd']
-        self.kl_div = torch.nn.KLDivLoss(log_target=True, reduction='none')
 
         self.convolution_topology = config["convolution_topology"]
 
@@ -93,14 +92,10 @@ class pool_CRBM_relu(Base_drelu):
         # i.e. Simplifies loading a model that has already been run
         self.save_hyperparameters()
 
-        # Initialize PT members
-        if self.sample_type == "pt":
-            try:
-                self.N_PT = config["N_PT"]
-            except KeyError:
-                print("No member N_PT found in provided config.")
-                sys.exit(1)
-            self.initialize_PT(self.N_PT, n_chains=None, record_acceptance=True, record_swaps=True)
+        # Initialize AIS/PT members
+        self.data_sampler = data_sampler(self, device=self.device)
+        self.log_Z_AIS = None
+        self.log_Z_AIS_std = None
 
     @property
     def h_layer_num(self):
@@ -266,30 +261,28 @@ class pool_CRBM_relu(Base_drelu):
     ## Mean of hidden layer specified by hidden_key
     def mean_h(self, psi, hidden_key=None, beta=1):
         if hidden_key is None:
-            means = []
-            for kid, key in enumerate(self.hidden_convolution_keys):
-                if beta == 1:
-                    gamma = (getattr(self, f'{key}_gamma')).unsqueeze(0)
-                    theta = (getattr(self, f'{key}_theta')).unsqueeze(0)
-                else:
-                    theta = (beta * getattr(self, f'{key}_theta') + (1 - beta) * getattr(self, f'{key}_0theta')).unsqueeze(0)
-                    gamma = (beta * getattr(self, f'{key}_gamma') + (1 - beta) * getattr(self, f'{key}_0gamma')).unsqueeze(0)
-                    psi[kid] *= beta
+            hidden_key = self.hidden_convolution_keys
+        elif type(hidden_key) is str:
+            hidden_key = [hidden_key]
 
-                sqrt_gamma = torch.sqrt(gamma)
-                means.append((psi[kid] - theta) / gamma + 1. / self.erf_times_gauss((-psi[kid] + theta) / sqrt_gamma) / sqrt_gamma)
-            return means
-        else:
+        means = []
+        for kid, key in enumerate(self.hidden_convolution_keys):
             if beta == 1:
-                gamma = (getattr(self, f'{hidden_key}_gamma')).unsqueeze(0)
-                theta = (getattr(self, f'{hidden_key}_theta')).unsqueeze(0)
+                gamma = (getattr(self, f'{key}_gamma')).unsqueeze(0)
+                theta = (getattr(self, f'{key}_theta')).unsqueeze(0)
             else:
-                theta = (beta * getattr(self, f'{hidden_key}_theta') + (1 - beta) * getattr(self, f'{hidden_key}_0theta')).unsqueeze(0)
-                gamma = (beta * getattr(self, f'{hidden_key}_gamma') + (1 - beta) * getattr(self, f'{hidden_key}_0gamma')).unsqueeze(0)
-                psi *= beta
+                theta = (beta * getattr(self, f'{key}_theta') + (1 - beta) * getattr(self, f'{key}_0theta')).unsqueeze(0)
+                gamma = (beta * getattr(self, f'{key}_gamma') + (1 - beta) * getattr(self, f'{key}_0gamma')).unsqueeze(0)
+                psi[kid] *= beta
 
             sqrt_gamma = torch.sqrt(gamma)
-            return (psi - theta) / gamma + 1. / self.erf_times_gauss((-psi + theta) / sqrt_gamma) / sqrt_gamma
+            means.append((psi[kid] - theta) / gamma + 1. / self.erf_times_gauss((-psi[kid] + theta) / sqrt_gamma) / sqrt_gamma)
+
+        if len(hidden_key) == 1:
+            return means[0]
+
+        return means
+
 
     ## Compute Input for Hidden Layer from Visible Potts, Uses one hot vector
     def compute_output_v(self, X):  # X is the one hot vector
@@ -309,12 +302,8 @@ class pool_CRBM_relu(Base_drelu):
             max_pool *= max_conv_values/max_conv_values.abs()
 
             self.max_inds.append(max_inds)
-
             out = max_pool.flatten(start_dim=2)
-
             out.squeeze_(2)
-
-            # out = self.normalize_inputs(out, key=i)
 
             if self.dr > 0.:
                 out = F.dropout(out, p=self.dr, training=self.training)
@@ -325,40 +314,11 @@ class pool_CRBM_relu(Base_drelu):
 
         return outputs
 
-    def exp_activation(self, x, y=3):
-        # assumes input is between -1 and 1
-        # act = (y*(-1+x.abs())).abs()
-        act = x.abs()
-
-        # batch_normed = (act - (act.mean(0)).clamp(min=0)).clamp(min=0)
-
-        # batch_normed = (act - y).clamp(min=0)
-        # batch_normed = (batch_normed + 1e-8)/(batch_normed.sum(0)[None, :] + 1e-8)
-
-        # h_normed = (batch_normed + 1e-8)/(batch_normed.sum(1)[:, None] + 1e-8)
-
-        ind_temp = self.ind_temp_schedule[self.current_epoch]
-        batch_normed = torch.softmax(act / ind_temp, -1)
-
-        # z score
-        # z_act = (act-act.mean(0)).div(act.std(0))
-        # norm to 0 and 1
-        # z_act = z_act + z_act.min().abs()
-        # z_act = z_act.div(z_act.max())
-        # return z_act
-
-        return act
-
-        # return (y*(-1+x.abs())).abs()
-
-
-    ## Compute Input for Visible Layer from Hidden dReLU
-    def compute_output_h(self, h, h_weights=None):  # from h_uk (B, hidden_num)
+    # Compute Input for Visible Layer from Hidden dReLU
+    def compute_output_h(self, h):  # from h_uk (B, hidden_num)
         outputs = []
         for iid, i in enumerate(self.hidden_convolution_keys):
             reconst = self.unpools[iid](h[iid].view_as(self.max_inds[iid]), self.max_inds[iid])
-
-            # reconst *= h_weights[iid][:, :, None].abs()
 
             if reconst.ndim == 3:
                 reconst.unsqueeze_(3)
@@ -370,13 +330,11 @@ class pool_CRBM_relu(Base_drelu):
                                               output_padding=self.convolution_topology[i]["output_padding"]).squeeze(1))
 
         if len(outputs) > 1:
-            out = torch.sum(torch.stack(outputs), 0)
-        else:
-            out = outputs[0]
+            return torch.sum(torch.stack(outputs), 0)
 
-        return out
+        return outputs[0]
 
-    ## Gibbs Sampling of Potts Visbile Layer
+    # Gibbs Sampling of Potts Visbile Layer
     def sample_from_inputs_v(self, psi, beta=1):  # Psi ohe (Batch_size, v_num, q)   fields (self.v_num, self.q)
         if beta == 1:
             cum_probas = psi + getattr(self, "fields").unsqueeze(0)
@@ -392,8 +350,8 @@ class pool_CRBM_relu(Base_drelu):
         dist = torch.distributions.categorical.Categorical(probs=cum_probas)
         return F.one_hot(dist.sample(), self.q)
 
-    ## Gibbs Sampling of dReLU hidden layer
     def sample_from_inputs_h(self, psi, nancheck=False, beta=1):  # psi is a list of hidden [input]
+        """Gibbs Sampling of ReLU hidden layer"""
         h_uks = []
         for iid, i in enumerate(self.hidden_convolution_keys):
             if beta == 1:
@@ -424,67 +382,15 @@ class pool_CRBM_relu(Base_drelu):
         return h_uks
 
     ###################################################### Sampling Functions
-    ## Samples hidden from visible and vice versa, returns newly sampled hidden and visible
+    # Samples hidden from visible and vice versa, returns newly sampled hidden and visible
     def markov_step(self, v, beta=1):
         # Gibbs Sampler
         h = self.sample_from_inputs_h(self.compute_output_v(v), beta=beta)
         return self.sample_from_inputs_v(self.compute_output_h(h), beta=beta), h
 
-    def markov_step_with_hidden_input(self, v, beta=1):
-        # Gibbs Sampler
-        iv = self.compute_output_v(v)
-        h = self.sample_from_inputs_h(iv, beta=beta)
-        h_w = self.normalize_inputs(iv, key='all')
-        h_w = [h.abs() for h in h_w]
-        vn = self.sample_from_inputs_v(self.compute_output_h(h, h_weights=h_w), beta=beta)
-        Ih = self.compute_output_v(vn)
-        return vn, h, Ih, h_w
-
-    def markov_PT_and_exchange(self, v, h, e, N_PT):
-        for i, beta in zip(torch.arange(N_PT), self.betas):
-            v[i], htmp = self.markov_step(v[i], beta=beta)
-            for hid in range(self.h_layer_num):
-                h[hid][i] = htmp[hid]
-            e[i] = self.energy(v[i], h, hidden_sub_index=i)
-
-        if self.record_swaps:
-            particle_id = torch.arange(N_PT).unsqueeze(1).expand(N_PT, v.shape[1])
-
-        betadiff = self.betas[1:] - self.betas[:-1]
-        for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
-            proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i]))
-            swap = torch.rand(proba.shape[0], device=self.device) < proba
-            if i > 0:
-                v[i:i + 2, swap] = torch.flip(v[i - 1: i + 1], [0])[:, swap]
-                for hid in range(self.h_layer_num):
-                    h[hid][i:i + 2, swap] = torch.flip(h[hid][i - 1: i + 1], [0])[:, swap]
-                # h[i:i + 2, swap] = torch.flip(h[i - 1: i + 1], [0])[:, swap]
-                e[i:i + 2, swap] = torch.flip(e[i - 1: i + 1], [0])[:, swap]
-                if self.record_swaps:
-                    particle_id[i:i + 2, swap] = torch.flip(particle_id[i - 1: i + 1], [0])[:, swap]
-            else:
-                v[i:i + 2, swap] = torch.flip(v[:i + 1], [0])[:, swap]
-                for hid in range(self.h_layer_num):
-                    h[hid][i:i + 2, swap] = torch.flip(h[hid][:i + 1], [0])[:, swap]
-                e[i:i + 2, swap] = torch.flip(e[:i + 1], [0])[:, swap]
-                if self.record_swaps:
-                    particle_id[i:i + 2, swap] = torch.flip(particle_id[:i + 1], [0])[:, swap]
-
-            if self.record_acceptance:
-                self.acceptance_rates[i] = swap.type(torch.get_default_dtype()).mean()
-                self.mav_acceptance_rates[i] = self.mavar_gamma * self.mav_acceptance_rates[i] + self.acceptance_rates[
-                    i] * (1 - self.mavar_gamma)
-
-        if self.record_swaps:
-            self.particle_id.append(particle_id)
-
-        self.count_swaps += 1
-        return v, h, e
-
     ######################################################### Pytorch Lightning Functions
     # def on_after_backward(self):
         # torch.nn.utils.clip_grad_norm_(self.parameters(), 10000, norm_type=2.0, error_if_nonfinite=True)
-
 
     # Clamps hidden potential values to acceptable range
     def on_before_zero_grad(self, optimizer):
@@ -533,7 +439,6 @@ class pool_CRBM_relu(Base_drelu):
 
             x = torch.sum(W.abs(), (3, 2, 1)).square()
             wreg += x.sum() * self.l1_2 / (W_shape[0] * W_shape[1] * W_shape[2] * W_shape[3])
-            # dreg += self.ld / ((getattr(self, f"{i}_W").abs() - getattr(self, f"{i}_W").squeeze(1).abs()).abs().sum((1, 2, 3)).mean() + 1)
             gap_loss += self.lgap * W[:, :, :, -1].abs().mean()
 
             Wpos = torch.clamp(W, min=0.)
@@ -541,7 +446,6 @@ class pool_CRBM_relu(Base_drelu):
             ws = Wpos.squeeze(1)
 
             with torch.no_grad():
-
                 # compute positional differences for all pairs of weights
                 pdiff = (ws.unsqueeze(0).unsqueeze(2) - ws.unsqueeze(1).unsqueeze(3)).sum(4)
 
@@ -655,20 +559,6 @@ class pool_CRBM_relu(Base_drelu):
         self.training_data_logs.append(logs)
         return logs["loss"]
 
-    def init_temp_schedule(self, temps):
-        if type(temps) is float:
-            end_temp, start_temp = temps, temps
-        elif type(temps) is list:
-            start_temp, end_temp = temps
-        vary_epoch = int(self.decay_after*self.epochs)
-        stationary_epochs = self.epochs - vary_epoch
-        vary_temps = torch.tensor(np.geomspace(start_temp, end_temp, vary_epoch), device=self.device)
-        stat_temp = torch.full((stationary_epochs,), vary_temps[-1], device=self.device)
-        return torch.concat([vary_temps, stat_temp], dim=0)
-
-    def altered_sigmoid(self, x, c=10, s=0.5):
-        return 1/(1+torch.exp(-c*(x-s)))
-
     def training_step_PCD_free_energy(self, batch, batch_idx):
         inds, seqs, one_hot, seq_weights = batch
 
@@ -678,164 +568,24 @@ class pool_CRBM_relu(Base_drelu):
         if self.current_epoch == 0:
             self.chain[inds] = one_hot.type(torch.get_default_dtype())
 
-        V_oh_neg, h_neg, h_neg_inputs_flat, h_pos, sparsity_penalty, h_w = self.forward_PCD(inds)
-
+        V_oh_neg, h_neg = self.forward_PCD(inds)
 
         inputs_flat = torch.concat(self.compute_output_v(one_hot), 1)
-        # h_inputs_flat = torch.concat([torch.clamp(inputs_flat, min=0.), torch.clamp(inputs_flat, max=0.).abs()], 1)
-        #
-        # ps = torch.concat(h_w, dim=1)
 
-        # with torch.no_grad():
-            # seq_temp = self.seq_temp_schedule[self.current_epoch]
-            # sw = self.energy(one_hot, self.sample_from_inputs_h(self.compute_output_v(one_hot)))
-            # sw = self.free_energy(one_hot)
-            #
-            # sw += sw.min().abs()  # change to positive range with highest value as highest energy values
-            # sw /= sw.max()  # change values to be between 0 and 1
-            # sw = torch.softmax(sw/seq_temp, -1)
-            # sw = self.altered_sigmoid(sw, c=100, s=0.75)
-            # sw /= sw.max()
-
-            # pm, _ = ps.max(1)
-            # sw = (1 - pm).clamp(min=0)
-            # sw = self.altered_sigmoid(sw, c=80, s=0.75).abs()
-            # sw /= sw.max()
-
-        # h_pos = [h.detach() for h in h_pos]
-        # for iid, i in enumerate(self.hidden_convolution_keys):
-        #     dot_prods = (torch.mm(h_pos[iid].T, h_pos[iid]) - torch.eye(h_pos[iid].shape[1])) / 2
-        #     orthogonal_loss = dot_prods.sum() * self.lkd
-        # kld_loss = (sw*self.kl_div(h_inputs_flat, h_neg_inputs_flat).abs().sum(1)).mean() * self.lkd
-        # kld_loss = (sw*(h_inputs_flat - h_neg_inputs_flat).square().sum(1)).mean() * self.lkd
-        # kld_loss = sparsity_penalty
-
-        ### Individual Free Energy
-        # F_v_ind = self.free_energy_ind(one_hot)
-        # lh_v_ind = - self.logpartition_h_ind(self.compute_output_v(one_hot))
-        # lh_vp_ind = - self.logpartition_h_ind(self.compute_output_v(V_oh_neg))
-        # F_v_vals, F_v_inds = torch.topk(F_v_ind, 1, dim=1, largest=False, sorted=False)
-        # F_v = F_v_vals.sum(1)
-        #
-        # F_vp_ind = self.free_energy_ind(V_oh_neg)
-        # F_vp = F_vp_ind.gather(1, F_v_inds).sum(1)  #F_vp_ind[torch.arange(len(F_v_inds)), F_v_inds.squeeze(1)]
-
-        ### Normal Way
+        ### Normal Wayss
         F_v = self.free_energy(one_hot)
         F_vp = self.free_energy(V_oh_neg)
 
-
-        # med_val, _ = ps.median(1)
-        # med_map = ps < med_val.unsqueeze(1)
-        # lh_v_ind[med_map] = 0.
-        # lh_vp_ind[med_map] = 0.
-        # F_v = self.energy_v(one_hot) + lh_v_ind.sum(1)  # free energy of training data
-        # F_vp = self.energy_v(V_oh_neg) + lh_vp_ind.sum(1)
-        # #
-        # lh_v_max, _ = lh_v_ind.max(1)
-        # Fdis = ((lh_v_max - (lh_v_ind.sum() - lh_v_max)/(lh_v_ind.shape[0] - 1)) * 0.05).mean()
-
-        # F_v_total = F_v.sum().abs()
-        # F_vp_total = F_vp.sum().abs()
-        #
-        # F_v = F_v * sw
-        # F_vp = F_vp * sw
-        #
-        # F_v = F_v/F_v.sum().abs() * F_v_total
-        # F_vp = F_vp/F_vp.sum().abs() * F_vp_total
-
-
-        ### Input Clustering Way
-        # all_flat_ws, hidden_node_parent = [], []
-        #
-        # start_w_count = 0
-        # for iid, i in enumerate(self.hidden_convolution_keys):
-        #     W = getattr(self, f"{i}_W")
-        #     Wpos = torch.clamp(W, min=0.)
-        #     Wneg = torch.clamp(W, max=0.)
-        #
-        #     ws = torch.concat([Wpos, Wneg.abs()], dim=0).squeeze(1)
-        #     all_flat_ws.append(ws)
-        #     hidden_node_parent.append((torch.arange(W.shape[0], device=self.device) + start_w_count).repeat(2))
-        #     start_w_count += W.shape[0]
-        #
-        # hidden_node_parent = torch.concat(hidden_node_parent, dim=0)
-        #
-        # flat_ws = torch.concat(all_flat_ws, dim=0)
-        # in_max_vals, in_max_inds = flat_ws.max(2)
-        #
-        # matching_percentages = h_inputs_flat.div(in_max_vals.sum(1)[None, :])
-        # _, matching_weights = matching_percentages.max(-1)
-        #
-        # mp_reg = ps.norm(dim=1, p=1).mean() * self.lkd * 0.0
-        # mp2_reg = matching_percentages.norm(dim=0, p=1).mean() * 0.0 # 0.0002
-
-        # F_v_ind = self.free_energy_ind(one_hot)
-        # F_vp_ind = self.free_energy_ind(V_oh_neg)
-        #
-        # F_v = (F_v_ind * (ps > 0.25)).sum(-1)
-        # F_vp = (F_vp_ind * (ps > 0.25)).sum(-1)
-
-        # ind_contribution = torch.full_like(F_v_ind, 0.0)
-        #
-        # ind_contribution.index_add_(-1, hidden_node_parent, matching_percentages)
-        #
-        # ind_temp = self.ind_temp_schedule[self.current_epoch]
-        # ps = torch.softmax(ps/ind_temp, -1)
-
-        # ps = self.altered_sigmoid(ps, c=50, s=0.5)
-        # ps = (ps - ps.mean(0)[None, :]).clamp(min=1e-6)
-
-        # tk_vals, tk_inds = ps.topk(1) # doesn't work very well
-
-        # F_v = (F_v_ind.gather(1, tk_inds)*tk_vals).sum(-1)
-        # F_vp = (F_vp_ind.gather(1, tk_inds)*tk_vals).sum(-1)
-
-        # F_v_total = F_v_ind.sum(1).abs()
-        # F_vp_total = F_vp_ind.sum(1).abs()
-        #
-        # F_v = (F_v_ind * ps).sum(-1)
-        # F_vp = (F_vp_ind * ps).sum(-1)
-
-
-
-        # matching_weights = torch.softmax(matching_weights/temp, -1)
-
-        # F_v = F_v * sw
-        # F_vp = F_vp * sw
-        #
-        # F_v = F_v/F_v.sum().abs() * F_v_total
-        # F_vp = F_vp/F_vp.sum().abs() * F_vp_total
-
-        # F_v = F_v * F_v_total
-        # F_vp = F_vp * F_vp_total
-
         kld_loss = self.kurtosis(F_v).clamp(min=0) * self.lkd
-        # cov_loss = torch.stack([torch.cov(h.T).triu().sum() for h in h_pos], dim=0).sum(0) * 0.1
         cov_loss = (torch.cov(inputs_flat.T).triu().abs().sum())/((inputs_flat.shape[1]*(inputs_flat.shape[1]+1))/2) * self.lcorr
-        # cov_loss = (((torch.cov(torch.stack([-F_v, seq_weights], dim=0)) / (torch.std(-F_v)*torch.std(seq_weights)))+1)-2).abs()[0][1]
-        # cov_loss *= self.lcorr
-
-        # f_v_pos = F_v*-1
-        # f_v_pos = f_v_pos - f_v_pos.min()
-        # f_v_pos = f_v_pos/f_v_pos.std()
-        #
-        # seq_weights = seq_weights - seq_weights.min()
-        # seq_weights = seq_weights/seq_weights.std()
-
-        # cov_loss = (seq_weights - f_v_pos).square().mean() * self.lcorr
 
         cd_loss = (F_v - F_vp).mean()
 
         # Regularization Terms
         freg, wreg, dreg, bs_loss, gap_loss, reg_dict = self.regularization_terms()
 
-
         # Calculate Loss
-        loss = cd_loss + freg + wreg + dreg + bs_loss + gap_loss + kld_loss + cov_loss  # + sparsity_penalty #  mp_reg + mp2_reg # + input_loss
-
-        if self.current_epoch == 600:
-            print("hi")
+        loss = cd_loss + freg + wreg + dreg + bs_loss + gap_loss + kld_loss + cov_loss
 
         if loss.isnan():
             print("okay")
@@ -868,109 +618,37 @@ class pool_CRBM_relu(Base_drelu):
         # bimodality = (skew.square() + 1) / kurtosis
         return (std-2)  # + ((dm.abs()-5)/5).clamp(min=0) #(std-4).clamp(min=0) + skew.abs()*3 (kurtosis - 2).clamp(min=0)*3
 
-    def mask_2d_kurtosis(self, x, mask):
-        n = mask.sum(0) + 2
-        mean = (x * mask).sum(0) / n
-        diffs = (x - mean + 1e-12) * mask
-        stds = torch.sqrt(diffs.square().sum(0) * (1 / (n - 1))) + 1e-12
-        zscores = (diffs / stds) + 1e-12
-        kurt = torch.pow(zscores, 4.0).sum() / n - 3
-        if kurt.isnan().any().item():
-            print('damn it kurt')
-        return kurt
-
-    def pearson_loss(self, Ih, k=2):
-        B, H = Ih.size()
-        mean = Ih.mean(dim=0).unsqueeze(0)
-        diffs = (Ih - mean)
-        prods = torch.matmul(diffs.T, diffs)
-        bcov = prods / (B - 1)  # Unbiased estimate
-        # matrix of stds
-        std = Ih.std(dim=0).unsqueeze(0)
-        std_mat = torch.matmul(std.T, std) + 1e-6
-
-        pearson_mat = (bcov / std_mat).abs()
-        triu_pearson_mat = pearson_mat.triu(diagonal=1)
-
-        self_interaction_term = torch.diagonal(pearson_mat, offset=H//2).sum()
-
-        topvals, topinds = torch.topk(triu_pearson_mat, k, dim=1)
-
-        other_interactions = pearson_mat.triu(diagonal=1).sum() - self_interaction_term - topvals.sum()*0.9
-
-        return other_interactions*self.lcorr
-
-    def normalize_inputs(self, h_inputs, key="all"):
-        hi = h_inputs
-
-        if key == "all":
-            for iid, i in enumerate(self.hidden_convolution_keys):
-                ws = getattr(self, f"{i}_W").squeeze(1)
-                # all_ws.append(W)
-                in_max_val_pos, _ = ws.clamp(min=0.).max(2)
-                in_max_val_pos = in_max_val_pos.sum(1)[None, :]
-                hi[iid] /= in_max_val_pos.expand(hi[iid].shape[0], -1)
-
-        else:
-            ws = getattr(self, f"{key}_W").squeeze(1)
-
-            in_max_val_pos, _ = ws.clamp(min=0.).max(2)
-            in_max_val_pos = in_max_val_pos.sum(1)[None, :]
-            hi /= in_max_val_pos.expand(hi.shape[0], -1)
-
-        return hi
-
     def forward_PCD(self, inds):
-        # Gibbs sampling with Persistent Contrastive Divergence
-        fantasy_v = self.chain[inds]  # Last sample that was saved to self.chain variable, initialized in training step
+        """Gibbs sampling with Persistent Contrastive Divergence"""
+        # Last sample that was saved to self.chain variable, initialized in training step
+        fantasy_v = self.chain[inds]
         h_pos = self.sample_from_inputs_h(self.compute_output_v(fantasy_v))
         for _ in range(self.mc_moves - 1):
             fantasy_v, fantasy_h = self.markov_step(fantasy_v)
 
-        V_neg, fantasy_h, hidden_input, h_w = self.markov_step_with_hidden_input(fantasy_v)
-
-        flat_hidden_input = torch.cat(hidden_input, dim=1)
-        hidden_inputs = [torch.clamp(flat_hidden_input, min=0.), torch.clamp(flat_hidden_input, max=0.).abs()]
-
-        # input_loss = self.pearson_loss(torch.cat(hidden_inputs, dim=1))
-
+        V_neg, fantasy_h = self.markov_step(fantasy_v)
         h_neg = self.sample_from_inputs_h(self.compute_output_v(V_neg))
-        #
-        sparsity_penalty = torch.tensor([0.], device=self.device)
-        # for kid, key in enumerate(self.hidden_convolution_keys):
-        #     shw = h_w[kid]
-        #     mask = shw >= 0
-        #     #
-        #     pos_kurt = self.mask_2d_kurtosis(shw, mask)
-        #     # neg_kurt = self.mask_2d_kurtosis(shw, ~mask)
-        #     #
-        #     sparsity_penalty += (pos_kurt+neg_kurt).mean() * self.lkd * 0.0
-
-            # sparsity_penalty += torch.sum(h_w[kid].abs(), (-1)).square().mean()/(2*h_w[kid].shape[1])*self.lkd
-            # sparsity_penalty += torch.sum(h_w[kid].abs(), (0)).square().mean()/(2*h_w[kid].shape[0])*self.lkd
-            # sparsity_penalty += torch.sum(h_w[kid].abs(), 1).mean() * self.lkd
-            # sparsity_penalty += torch.linalg.norm(h_w[kid], dim=1).mean()
-
+        # Save current sample for next iteration
         self.chain[inds] = V_neg.detach().type(torch.get_default_dtype())
 
-        return V_neg, h_neg, torch.cat(hidden_inputs, dim=1), h_pos, sparsity_penalty, h_w
+        return V_neg, h_neg
 
-    def forward_PT(self, V_pos_ohe):
+    def forward_PT(self, V_pos_ohe, N_PT):
         # Initialize_PT is called before the forward function is called. Therefore, N_PT will be filled
         # Parallel Tempering
         n_chains = V_pos_ohe.shape[0]
 
         with torch.no_grad():
-            fantasy_v = self.random_init_config_v(custom_size=(self.N_PT, n_chains))
-            fantasy_h = self.random_init_config_h(custom_size=(self.N_PT, n_chains))
-            fantasy_E = self.energy_PT(fantasy_v, fantasy_h, self.N_PT)
+            fantasy_v = self.random_init_config_v(custom_size=(N_PT, n_chains))
+            fantasy_h = self.random_init_config_h(custom_size=(N_PT, n_chains))
+            fantasy_E = self.energy_PT(fantasy_v, fantasy_h, N_PT)
 
             for _ in range(self.mc_moves - 1):
-                fantasy_v, fantasy_h, fantasy_E = self.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E,self.N_PT)
-                self.update_betas(self.N_PT)
+                fantasy_v, fantasy_h, fantasy_E = self.data_sampler.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E, N_PT)
+                self.data_sampler.update_betas(N_PT)
 
-        fantasy_v, fantasy_h, fantasy_E = self.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E, self.N_PT)
-        self.update_betas(self.N_PT)
+        fantasy_v, fantasy_h, fantasy_E = self.data_sampler.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E, N_PT)
+        self.data_sampler.update_betas(N_PT)
 
         # V_neg, h_neg, V_pos, h_pos
         return fantasy_v[0], fantasy_h[0], V_pos_ohe, self.sample_from_inputs_h(self.compute_output_v(V_pos_ohe))
@@ -985,14 +663,16 @@ class pool_CRBM_relu(Base_drelu):
 
     # X must be a pandas dataframe with the sequences in string format under the column 'sequence'
     # Returns the likelihood for each sequence in an array
-    def predict(self, X, individual_hiddens=False):
+    def predict(self, dataframe, column_key='sequence', individual_hiddens=False, device='cpu'):
         # Read in data
-        reader = Categorical(X, self.q, weights=None, max_length=self.v_num, molecule=self.molecule, device=self.device, one_hot=True)
+        reader = Categorical(dataframe, self.q, weights=None, max_length=self.v_num, alphabet=self.alphabet,
+                             device=torch.device('cpu'), one_hot=True)
+        # Put in Dataloader
         data_loader = torch.utils.data.DataLoader(
             reader,
             batch_size=self.batch_size,
             num_workers=self.worker_num,  # Set to 0 if debug = True
-            pin_memory=self.pin_mem,
+            pin_memory=False,
             shuffle=False
         )
         self.eval()
@@ -1000,9 +680,10 @@ class pool_CRBM_relu(Base_drelu):
             likelihood = []
             for i, batch in enumerate(data_loader):
                 inds, seqs, one_hot, seq_weights = batch
-                likelihood += self.likelihood(one_hot, individual_hiddens=individual_hiddens).detach().tolist()
+                oh = one_hot.to(torch.device(self.device))
+                likelihood += self.likelihood(one_hot, individual_hiddens=individual_hiddens).detach().cpu().tolist()
 
-        return X.sequence.tolist(), likelihood
+        return dataframe.sequence.tolist(), likelihood
 
     # Replace gap state contribution to 0 in all weights/biases
     def fill_gaps_in_parameters(self, fill=1e-6):
@@ -1017,7 +698,7 @@ class pool_CRBM_relu(Base_drelu):
     # X must be a pandas dataframe with the sequences in string format under the column 'sequence'
     # Returns the saliency map for all sequences in X
     def saliency_map(self, X):
-        reader = Categorical(X, self.q, weights=None, max_length=self.v_num, molecule=self.molecule, device=self.device, one_hot=True)
+        reader = Categorical(X, self.q, weights=None, max_length=self.v_num, molecule=self.alphabet, device=self.device, one_hot=True)
         data_loader = torch.utils.data.DataLoader(
             reader,
             batch_size=self.batch_size,
@@ -1045,85 +726,9 @@ class pool_CRBM_relu(Base_drelu):
 
         return torch.cat(saliency_maps, dim=0)
 
-    def update_betas(self, N_PT, beta=1, update_betas_lr=0.1, update_betas_lr_decay=1):
-        with torch.no_grad():
-            if N_PT < 3:
-                return
-            if self.acceptance_rates.mean() > 0:
-                self.stiffness = torch.maximum(1 - (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()), torch.zeros_like(self.mav_acceptance_rates)) + 1e-4 * torch.ones(N_PT - 1)
-                diag = self.stiffness[0:-1] + self.stiffness[1:]
-                if N_PT > 3:
-                    offdiag_g = -self.stiffness[1:-1]
-                    offdiag_d = -self.stiffness[1:-1]
-                    M = torch.diag(offdiag_g, -1) + torch.diag(diag, 0) + torch.diag(offdiag_d, 1)
-                else:
-                    M = torch.diag(diag, 0)
-                B = torch.zeros(N_PT - 2)
-                B[0] = self.stiffness[0] * beta
-                self.betas[1:-1] = self.betas[1:-1] * (1 - update_betas_lr) + update_betas_lr * torch.linalg.solve(M, B)
-                update_betas_lr *= update_betas_lr_decay
-
-    def AIS(self, M=10, n_betas=10000, batches=None, verbose=0, beta_type='adaptive'):
-        with torch.no_grad():
-            if beta_type == 'linear':
-                betas = torch.arange(n_betas, device=self.device) / torch.tensor(n_betas - 1, dtype=torch.float64, device=self.device)
-            elif beta_type == 'root':
-                betas = torch.sqrt(torch.arange(n_betas, device=self.device)) / torch.tensor(n_betas - 1, dtype=torch.float64, device=self.device)
-            elif beta_type == 'adaptive':
-                Nthermalize = 200
-                Nchains = 20
-                N_PT = 11
-                self.adaptive_PT_lr = 0.05
-                self.adaptive_PT_decay = True
-                self.adaptive_PT_lr_decay = 10 ** (-1 / float(Nthermalize))
-                if verbose:
-                    t = time.time()
-                    print('Learning betas...')
-                self.gen_data(N_PT=N_PT, Nchains=Nchains, Lchains=1, Nthermalize=Nthermalize, update_betas=True)
-                if verbose:
-                    print('Elapsed time: %s, Acceptance rates: %s' % (time.time() - t, self.mav_acceptance_rates))
-                betas = []
-                sparse_betas = self.betas.flip(0)
-                for i in range(N_PT - 1):
-                    betas += list(sparse_betas[i] + (sparse_betas[i + 1] - sparse_betas[i]) * torch.arange(n_betas / (N_PT - 1), device=self.device) / (n_betas / (N_PT - 1) - 1))
-                betas = torch.tensor(betas, device=self.device)
-                # if verbose:
-                # import matplotlib.pyplot as plt
-                # plt.plot(betas); plt.title('Interpolating temperatures');plt.show()
-
-            # Initialization.
-            log_weights = torch.zeros(M, device=self.device)
-            # config = self.gen_data(Nchains=M, Lchains=1, Nthermalize=0, beta=0)
-
-            config = [self.sample_from_inputs_v(self.random_init_config_v(custom_size=(M,))),
-                      self.sample_from_inputs_h(self.random_init_config_h(custom_size=(M,)))]
-
-            log_Z_init = torch.zeros(1, device=self.device)
-
-            log_Z_init += self.logpartition_h(self.random_init_config_h(custom_size=(1,), zeros=True), beta=0)
-            log_Z_init += self.logpartition_v(self.random_init_config_v(custom_size=(1,), zeros=True), beta=0)
-
-            if verbose:
-                print(f'Initial evaluation: log(Z) = {log_Z_init.data}')
-
-            for i in range(1, n_betas):
-                if verbose:
-                    if (i % 2000 == 0):
-                        print(f'Iteration {i}, beta: {betas[i]}')
-                        print('Current evaluation: log(Z)= %s +- %s' % ((log_Z_init + log_weights).mean(), (log_Z_init + log_weights).std() / np.sqrt(M)))
-
-                config[0], config[1] = self.markov_step(config[0])
-                energy = self.energy(config[0], config[1])
-                log_weights += -(betas[i] - betas[i - 1]) * energy
-            self.log_Z_AIS = (log_Z_init + log_weights).mean()
-            self.log_Z_AIS_std = (log_Z_init + log_weights).std() / np.sqrt(M)
-            if verbose:
-                print('Final evaluation: log(Z)= %s +- %s' % (self.log_Z_AIS, self.log_Z_AIS_std))
-            return self.log_Z_AIS, self.log_Z_AIS_std
-
     def likelihood(self, data, recompute_Z=False, individual_hiddens=False):
-        if (not hasattr(self, 'log_Z_AIS')) | recompute_Z:
-            self.AIS()
+        if (self.log_Z_AIS is None) | recompute_Z:
+            self.log_Z_AIS, self.log_Z_AIS_std = self.data_sampler.AIS()
         if individual_hiddens:
             return -self.free_energy_ind(data)
         else:
@@ -1144,101 +749,160 @@ class pool_CRBM_relu(Base_drelu):
         out = self.log_erf_times_gauss((-I + theta) / sqrt_gamma) - 0.5 * log_gamma
         return out
 
-    def gen_data(self, Nchains=10, Lchains=100, Nthermalize=0, Nstep=1, N_PT=1, config_init=[], beta=1, batches=None, reshape=True, record_replica=False, record_acceptance=None, update_betas=None, record_swaps=False):
-        """
-        Generate Monte Carlo samples from the RBM. Starting from random initial conditions, Gibbs updates are performed to sample from equilibrium.
-        Inputs :
-            Nchains (10): Number of Markov chains
-            Lchains (100): Length of each chain
-            Nthermalize (0): Number of Gibbs sampling steps to perform before the first sample of a chain.
-            Nstep (1): Number of Gibbs sampling steps between each sample of a chain
-            N_PT (1): Number of Monte Carlo Exchange replicas to use. This==useful if the mixing rate==slow. Watch self.acceptance_rates_g to check that it==useful (acceptance rates about 0==useless)
-            batches (10): Number of batches. Must divide Nchains. higher==better for speed (more vectorized) but more RAM consuming.
-            reshape (True): If True, the output==(Nchains x Lchains, n_visibles/ n_hiddens) (chains mixed). Else, the output==(Nchains, Lchains, n_visibles/ n_hiddens)
-            config_init ([]). If not [], a Nchains X n_visibles numpy array that specifies initial conditions for the Markov chains.
-            beta (1): The inverse temperature of the model.
-        """
+
+
+
+class data_sampler:
+    def __init__(self, pcrbm, device='cpu', **kwargs):
+
+        self.model = pcrbm
+        self.device = torch.device(device)
+
+        self.record_acceptance = False
+        self.record_swaps = False
+
+        self.count_swaps = 0
+        self.last_at_zero = None
+        self.trip_duration = None
+
+        for k, v in kwargs:
+            setattr(self, k, v)
+
+    def update_betas(self, N_PT, beta=1, update_betas_lr=0.1, update_betas_lr_decay=1):
         with torch.no_grad():
-            self.initialize_PT(N_PT, n_chains=Nchains, record_acceptance=record_acceptance, record_swaps=record_swaps)
+            stiffness = torch.maximum(1 - (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()),
+                                           torch.zeros_like(self.mav_acceptance_rates, device=self.device)) \
+                                      + 1e-4 * torch.ones(N_PT - 1)
+            diag = stiffness[0:-1] + stiffness[1:]
+            offdiag_g = -stiffness[1:-1]
+            offdiag_d = -stiffness[1:-1]
+            M = torch.diag(offdiag_g, -1) + torch.diag(diag, 0) + torch.diag(offdiag_d, 1)
 
-            if batches == None:
-                batches = Nchains
-            n_iter = int(Nchains / batches)
-            Ndata = Lchains * batches
-            if record_replica:
-                reshape = False
+            B = torch.zeros(N_PT - 2, device=self.device)
+            B[0] = stiffness[0] * beta
+            self.betas[1:-1] = self.betas[1:-1] * (1 - update_betas_lr) + update_betas_lr * torch.linalg.solve(M, B)
+            update_betas_lr *= update_betas_lr_decay
 
-            if (N_PT > 1):
-                if record_acceptance == None:
-                    record_acceptance = True
+    def markov_PT_and_exchange(self, v, h, e, N_PT):
+        for i, beta in zip(torch.arange(N_PT), self.betas):
+            v[i], htmp = self.model.markov_step(v[i], beta=beta)
+            for hid in range(self.model.h_layer_num):
+                h[hid][i] = htmp[hid]
+            e[i] = self.model.energy(v[i], h, hidden_sub_index=i)
 
-                if update_betas == None:
-                    update_betas = False
+        if self.record_swaps:
+            particle_id = torch.arange(N_PT).unsqueeze(1).expand(N_PT, v.shape[1])
 
-                # if record_acceptance:
-                #     self.mavar_gamma = 0.95
+        betadiff = self.betas[1:] - self.betas[:-1]
+        for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
+            proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i]))
+            swap = torch.rand(proba.shape[0], device=self.device) < proba
+            if i > 0:
+                v[i:i + 2, swap] = torch.flip(v[i - 1: i + 1], [0])[:, swap]
+                for hid in range(self.model.h_layer_num):
+                    h[hid][i:i + 2, swap] = torch.flip(h[hid][i - 1: i + 1], [0])[:, swap]
 
-                if update_betas:
-                    record_acceptance = True
-                    # self.update_betas_lr = 0.1
-                    # self.update_betas_lr_decay = 1
+                e[i:i + 2, swap] = torch.flip(e[i - 1: i + 1], [0])[:, swap]
+                if self.record_swaps:
+                    particle_id[i:i + 2, swap] = torch.flip(particle_id[i - 1: i + 1], [0])[:, swap]
             else:
-                record_acceptance = False
-                update_betas = False
+                v[i:i + 2, swap] = torch.flip(v[:i + 1], [0])[:, swap]
+                for hid in range(self.model.h_layer_num):
+                    h[hid][i:i + 2, swap] = torch.flip(h[hid][:i + 1], [0])[:, swap]
+                e[i:i + 2, swap] = torch.flip(e[:i + 1], [0])[:, swap]
+                if self.record_swaps:
+                    particle_id[i:i + 2, swap] = torch.flip(particle_id[:i + 1], [0])[:, swap]
 
-            if (N_PT > 1) and record_replica:
-                visible_data = self.random_init_config_v(custom_size=(Nchains, N_PT, Lchains), zeros=True)
-                hidden_data = self.random_init_config_h(custom_size=(Nchains, N_PT, Lchains), zeros=True)
-                data = [visible_data, hidden_data]
-            else:
-                visible_data = self.random_init_config_v(custom_size=(Nchains, Lchains), zeros=True)
-                hidden_data = self.random_init_config_h(custom_size=(Nchains, Lchains), zeros=True)
-                data = [visible_data, hidden_data]
+            if self.record_acceptance:
+                self.acceptance_rates[i] = swap.type(torch.get_default_dtype()).mean()
+                self.mav_acceptance_rates[i] = self.mavar_gamma * self.mav_acceptance_rates[i] + self.acceptance_rates[
+                    i] * (1 - self.mavar_gamma)
 
-            if config_init is not []:
-                if type(config_init) == torch.tensor:
-                    h_layer = self.random_init_config_h()
-                    config_init = [config_init, h_layer]
+        if self.record_swaps:
+            self.particle_id.append(particle_id)
 
-            for i in range(n_iter):
-                if config_init == []:
-                    config = self._gen_data(Nthermalize, Ndata, Nstep, N_PT=N_PT, batches=batches, reshape=False, beta=beta,
-                                            record_replica=record_replica, record_acceptance=record_acceptance, update_betas=update_betas, record_swaps=record_swaps)
-                else:
-                    config_init = [config_init[0][batches * i:batches * (i + 1)], config_init[1][batches * i:batches * (i + 1)]]
-                    config = self._gen_data(Nthermalize, Ndata, Nstep, N_PT=N_PT, batches=batches, reshape=False, beta=beta,
-                                            record_replica=record_replica, config_init=config_init, record_acceptance=record_acceptance,
-                                            update_betas=update_betas, record_swaps=record_swaps)
+        self.count_swaps += 1
+        return v, h, e
 
-                if (N_PT > 1) & record_replica:
-                    data[0][batches * i:batches * (i + 1)] = torch.swapaxes(config[0], 0, 2).clone()
-                    for hid in range(self.h_layer_num):
-                        data[1][hid][batches * i:batches * (i + 1)] = torch.swapaxes(config[1][hid], 0, 2).clone()
-                else:
-                    data[0][batches * i:batches * (i + 1)] = torch.swapaxes(config[0], 0, 1).clone()
-                    for hid in range(self.h_layer_num):
-                        data[1][hid][batches * i:batches * (i + 1)] = torch.swapaxes(config[1][hid], 0, 1).clone()
-
-            if reshape:
-                return [data[0].flatten(0, -3), [hd.flatten(0, -3) for hd in data[1]]]
-            else:
-                return data
-
-    def _gen_data(self, Nthermalize, Ndata, Nstep, N_PT=1, batches=1, reshape=True, config_init=[], beta=1, record_replica=False, record_acceptance=True, update_betas=False, record_swaps=False):
+    def AIS(self, M=10, n_betas=10000, batches=None, verbose=0, beta_type='adaptive'):
         with torch.no_grad():
+            if beta_type == 'linear':
+                betas = torch.arange(n_betas, device=self.device) / torch.tensor(n_betas - 1, dtype=torch.float64,
+                                                                                 device=self.device)
+            elif beta_type == 'root':
+                betas = torch.sqrt(torch.arange(n_betas, device=self.device)) / \
+                        torch.tensor(n_betas - 1, dtype=torch.float64, device=self.device)
+            elif beta_type == 'adaptive':
+                Nthermalize = 200
+                Nchains = 20
+                N_PT = 11
+                # adaptive_PT_lr = 0.05
+                # adaptive_PT_decay = True
+                # adaptive_PT_lr_decay = 10 ** (-1 / float(Nthermalize))
+                if verbose:
+                    t = time.time()
+                    print('Learning betas...')
+                self.gen_data(N_PT=N_PT, Nchains=Nchains, Lchains=1, Nthermalize=Nthermalize, update_betas=True)
+                if verbose:
+                    print('Elapsed time: %s, Acceptance rates: %s' % (time.time() - t, self.mav_acceptance_rates))
+                betas = []
+                sparse_betas = self.betas.flip(0)
+                for i in range(N_PT - 1):
+                    betas += list(
+                        sparse_betas[i] + (sparse_betas[i + 1] - sparse_betas[i]) *
+                        torch.arange(n_betas / (N_PT - 1),  device=self.device) /
+                        (n_betas / (N_PT - 1) - 1))
+                betas = torch.tensor(betas, device=self.device)
+                n_betas = betas.shape[0]
 
-            if N_PT > 1:
-                if update_betas or len(self.betas) != N_PT:
-                    self.betas = torch.flip(torch.arange(N_PT) / (N_PT - 1) * beta, [0])
+            # Initialization.
+            log_weights = torch.zeros(M, device=self.device)
+            # config = self.gen_data(Nchains=M, Lchains=1, Nthermalize=0, beta=0)
 
-                self.acceptance_rates = torch.zeros(N_PT - 1)
-                self.mav_acceptance_rates = torch.zeros(N_PT - 1)
+            config = [self.model.sample_from_inputs_v(self.model.random_init_config_v(custom_size=(M,))),
+                      self.model.sample_from_inputs_h(self.model.random_init_config_h(custom_size=(M,)))]
+
+            log_Z_init = torch.zeros(1, device=self.device)
+            log_Z_init += self.model.logpartition_h(self.model.random_init_config_h(custom_size=(1,), zeros=True), beta=0)
+            log_Z_init += self.model.logpartition_v(self.model.random_init_config_v(custom_size=(1,), zeros=True), beta=0)
+
+            if verbose:
+                print(f'Initial evaluation: log(Z) = {log_Z_init.data}')
+
+            for i in range(1, n_betas):
+                if verbose:
+                    if (i % 2000 == 0):
+                        print(f'Iteration {i}, beta: {betas[i]}')
+                        print('Current evaluation: log(Z)= %s +- %s' % (
+                        (log_Z_init + log_weights).mean(), (log_Z_init + log_weights).std() / np.sqrt(M)))
+
+                config[0], config[1] = self.model.markov_step(config[0], beta=betas[i])
+                energy = self.model.energy(config[0], config[1])
+                log_weights += -(betas[i] - betas[i - 1]) * energy
+
+            log_Z_AIS = (log_Z_init + log_weights).mean()
+            log_Z_AIS_std = (log_Z_init + log_weights).std() / np.sqrt(M)
+            if verbose:
+                print('Final evaluation: log(Z)= %s +- %s' % (log_Z_AIS, log_Z_AIS_std))
+            return log_Z_AIS, log_Z_AIS_std
+
+    def _gen_data(self, Nthermalize, Ndata, Nstep, N_PT=1, batches=1, reshape=True,
+                   config_init=[], beta=1, record_replica=False, update_betas=False):
+
+        if Ndata < 2:
+            raise Exception("Ndata must be 2 or greater!")
+
+        with torch.no_grad():
+            if update_betas or len(self.betas) != N_PT:
+                self.betas = torch.flip(torch.arange(N_PT, device=self.device) / (N_PT - 1) * beta, [0])
+
+            self.acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
+            self.mav_acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
 
             self.count_swaps = 0
-            self.record_swaps = record_swaps
 
             if self.record_swaps:
-                self.particle_id = [torch.arange(N_PT)[:, None].repeat(batches, dim=1)]
+                self.particle_id = [torch.arange(N_PT, device=self.device)[:, None].repeat(batches, dim=1)]
 
             Ndata /= batches
             Ndata = int(Ndata)
@@ -1246,100 +910,65 @@ class pool_CRBM_relu(Base_drelu):
             if config_init != []:
                 config = config_init
             else:
-                if N_PT > 1:
-                    config = [self.random_init_config_v(custom_size=(N_PT, batches)), self.random_init_config_h(custom_size=(N_PT, batches))]
-                else:
-                    config = [self.random_init_config_v(custom_size=(batches,)), self.random_init_config_h(custom_size=(batches,))]
+                config = [self.model.random_init_config_v(custom_size=(N_PT, batches)),
+                          self.model.random_init_config_h(custom_size=(N_PT, batches))]
 
             for _ in range(Nthermalize):
-                if N_PT > 1:
-                    energy = self.energy_PT(config[0], config[1], N_PT)
-                    config[0], config[1], energy = self.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
-                    if update_betas:
-                        self.update_betas(N_PT, beta=beta)
-                else:
-                    config[0], config[1] = self.markov_step(config[0], beta=beta)
+                energy = self.model.energy_PT(config[0], config[1], N_PT)
+                config[0], config[1], energy = self.model.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
+                if update_betas:
+                    self.update_betas(N_PT, beta=beta)
 
-            if N_PT > 1:
-                if record_replica:
-                    data = [config[0].clone().unsqueeze(0), self.clone_h(config[1], expand_dims=[0])]
-                else:
-                    data = [config[0][0].clone().unsqueeze(0), self.clone_h(config[1], expand_dims=[0], sub_index=0)]
-            else:
-                data = [config[0].clone().unsqueeze(0), self.clone_h(config[1], expand_dims=[0])]
+            # if record_replica:
+            #     data = [config[0].clone().unsqueeze(0), self.model.clone_h(config[1], expand_dims=[0])]
+            # else:
+            #     data = [config[0][0].clone().unsqueeze(0), self.model.clone_h(config[1], expand_dims=[0], sub_index=0)]
 
-            if N_PT > 1:
-                if Ndata > 1:
-                    if record_replica:
-                        data_gen_v = self.random_init_config_v(custom_size=(Ndata, N_PT, batches), zeros=True)
-                        data_gen_h = self.random_init_config_h(custom_size=(Ndata, N_PT, batches), zeros=True)
-                        data_gen_v[0] = config[0].clone()
-
-                        clone = self.clone_h(config[1])
-                        for hid in range(self.h_layer_num):
-                            data_gen_h[hid][0] = clone[hid]
-                    else:
-                        data_gen_v = self.random_init_config_v(custom_size=(Ndata, batches), zeros=True)
-                        data_gen_h = self.random_init_config_h(custom_size=(Ndata, batches), zeros=True)
-                        data_gen_v[0] = config[0][0].clone()
-
-                        clone = self.clone_h(config[1], sub_index=0)
-                        for hid in range(self.h_layer_num):
-                            data_gen_h[hid][0] = clone[hid]
-            else:
-                data_gen_v = self.random_init_config_v(custom_size=(Ndata, batches), zeros=True)
-                data_gen_h = self.random_init_config_h(custom_size=(Ndata, batches), zeros=True)
+            if record_replica:
+                data_gen_v = self.model.random_init_config_v(custom_size=(Ndata, N_PT, batches), zeros=True)
+                data_gen_h = self.model.random_init_config_h(custom_size=(Ndata, N_PT, batches), zeros=True)
                 data_gen_v[0] = config[0].clone()
 
-                clone = self.clone_h(config[1])
-                for hid in range(self.h_layer_num):
+                clone = self.model.clone_h(config[1])
+                for hid in range(self.model.h_layer_num):
+                    data_gen_h[hid][0] = clone[hid]
+            else:
+                data_gen_v = self.model.random_init_config_v(custom_size=(Ndata, batches), zeros=True)
+                data_gen_h = self.model.random_init_config_h(custom_size=(Ndata, batches), zeros=True)
+                data_gen_v[0] = config[0][0].clone()
+
+                clone = self.model.clone_h(config[1], sub_index=0)
+                for hid in range(self.model.h_layer_num):
                     data_gen_h[hid][0] = clone[hid]
 
             for n in range(Ndata - 1):
                 for _ in range(Nstep):
-                    if N_PT > 1:
-                        energy = self.energy_PT(config[0], config[1], N_PT)
-                        config[0], config[1], energy = self.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
-                        if update_betas:
-                            self.update_betas(N_PT, beta=beta)
-                    else:
-                        config[0], config[1] = self.markov_step(config[0], beta=beta)
+                    energy = self.model.energy_PT(config[0], config[1], N_PT)
+                    config[0], config[1], energy = self.model.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
+                    if update_betas:
+                        self.update_betas(N_PT, beta=beta)
 
-                if N_PT > 1 and Ndata > 1:
-                    if record_replica:
-                        data_gen_v[n + 1] = config[0].clone()
 
-                        clone = self.clone_h(config[1])
-                        for hid in range(self.h_layer_num):
-                            data_gen_h[hid][n + 1] = clone[hid]
-
-                    else:
-                        data_gen_v[n + 1] = config[0][0].clone()
-
-                        clone = self.clone_h(config[1], sub_index=0)
-                        for hid in range(self.h_layer_num):
-                            data_gen_h[hid][n + 1] = clone[hid]
-
-                else:
+                if record_replica:
                     data_gen_v[n + 1] = config[0].clone()
 
-                    clone = self.clone_h(config[1])
-                    for hid in range(self.h_layer_num):
+                    clone = self.model.clone_h(config[1])
+                    for hid in range(self.model.h_layer_num):
                         data_gen_h[hid][n + 1] = clone[hid]
 
-            if Ndata > 1:
-                data = [data_gen_v, data_gen_h]
+
+            data = [data_gen_v, data_gen_h]
 
             if self.record_swaps:
                 print('cleaning particle trajectories')
                 positions = torch.tensor(self.particle_id)
-                invert = torch.zeros([batches, Ndata, N_PT])
+                invert = torch.zeros([batches, Ndata, N_PT], device=self.device)
                 for b in range(batches):
                     for i in range(Ndata):
                         for k in range(N_PT):
                             invert[b, i, k] = torch.nonzero(positions[i, :, b] == k)[0]
                 self.particle_id = invert
-                self.last_at_zero = torch.zeros([batches, Ndata, N_PT])
+                self.last_at_zero = torch.zeros([batches, Ndata, N_PT], device=self.device)
                 for b in range(batches):
                     for i in range(Ndata):
                         for k in range(N_PT):
@@ -1350,10 +979,10 @@ class pool_CRBM_relu(Base_drelu):
                                 self.last_at_zero[b, i, k] = 1000
                 self.last_at_zero[:, 0, 0] = 0
 
-                self.trip_duration = torch.zeros([batches, Ndata])
+                self.trip_duration = torch.zeros([batches, Ndata], device=self.device)
                 for b in range(batches):
                     for i in range(Ndata):
-                        self.trip_duration[b, i] = self.last_at_zero[b, i, np.nonzero(invert[b, i, :] == 9)[0]]
+                        self.trip_duration[b, i] = self.last_at_zero[b, i, torch.nonzero(invert[b, i, :] == 9)[0]]
 
             if reshape:
                 data[0] = data[0].flatten(0, -3)
@@ -1363,3 +992,71 @@ class pool_CRBM_relu(Base_drelu):
                 data[1] = data[1]
 
             return data
+
+    def gen_data(self, Nchains=10, Lchains=100, Nthermalize=0, Nstep=1, N_PT=2, config_init=[], beta=1, batches=None,
+                 reshape=True, record_replica=False, record_acceptance=None, update_betas=None, record_swaps=False):
+        """
+        Generate Monte Carlo samples from the RBM. Starting from random initial conditions, Gibbs updates are performed to sample from equilibrium.
+        Inputs :
+            Nchains (10): Number of Markov chains
+            Lchains (100): Length of each chain
+            Nthermalize (0): Number of Gibbs sampling steps to perform before the first sample of a chain.
+            Nstep (1): Number of Gibbs sampling steps between each sample of a chain
+            N_PT (2): Number of Monte Carlo Exchange replicas to use. This==useful if the mixing rate==slow. Watch self.acceptance_rates_g to check that it==useful (acceptance rates about 0==useless)
+            batches (10): Number of batches. Must divide Nchains. higher==better for speed (more vectorized) but more RAM consuming.
+            reshape (True): If True, the output==(Nchains x Lchains, n_visibles/ n_hiddens) (chains mixed). Else, the output==(Nchains, Lchains, n_visibles/ n_hiddens)
+            config_init ([]). If not [], a Nchains X n_visibles numpy array that specifies initial conditions for the Markov chains.
+            beta (1): The inverse temperature of the model.
+        """
+        if N_PT < 2:
+            raise Exception("N_PT must be greater than 1")
+
+        with torch.no_grad():
+            if batches == None:
+                batches = Nchains
+            n_iter = int(Nchains / batches)
+            Ndata = Lchains * batches
+            if record_replica:
+                reshape = False
+
+                if record_acceptance == None:
+                    record_acceptance = True
+
+                if update_betas == None:
+                    update_betas = False
+
+                if update_betas:
+                    record_acceptance = True
+
+            else:
+                record_acceptance = False
+                update_betas = False
+
+            if record_replica:
+                visible_data = self.model.random_init_config_v(custom_size=(Nchains, N_PT, Lchains), zeros=True)
+                hidden_data = self.model.random_init_config_h(custom_size=(Nchains, N_PT, Lchains), zeros=True)
+                data = [visible_data, hidden_data]
+
+            if config_init is not []:
+                if type(config_init) == torch.tensor:
+                    h_layer = self.model.random_init_config_h()
+                    config_init = [config_init, h_layer]
+
+            for i in range(n_iter):
+                if config_init != []:
+                    config_init = [config_init[0][batches * i:batches * (i + 1)],
+                                   config_init[1][batches * i:batches * (i + 1)]]
+
+                config = self._gen_data(Nthermalize, Ndata, Nstep, N_PT=N_PT, batches=batches, reshape=False,
+                                        beta=beta, record_replica=record_replica, update_betas=update_betas)
+
+
+                if record_replica:
+                    data[0][batches * i:batches * (i + 1)] = torch.swapaxes(config[0], 0, 2).clone()
+                    for hid in range(self.model.h_layer_num):
+                        data[1][hid][batches * i:batches * (i + 1)] = torch.swapaxes(config[1][hid], 0, 2).clone()
+
+            if reshape:
+                return [data[0].flatten(0, -3), [hd.flatten(0, -3) for hd in data[1]]]
+            else:
+                return data

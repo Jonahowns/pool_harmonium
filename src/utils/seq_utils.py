@@ -11,7 +11,6 @@ from functools import partial
 import pickle
 
 
-
 def cat_to_seq(categorical_tensor, molecule="protein"):
     base_to_id = utils.int_to_letter_dicts[molecule]
     seqs = []
@@ -120,7 +119,7 @@ def prune_similar_sequences_df(df1, df2, hamming_threshold=0, molecule="protein"
         mdists += n1
 
     if return_min_distances:
-        return [x* seq_len for x in mdists]
+        return [x * seq_len for x in mdists]
     else:
         keep = np.asarray(mdists)*seq_len > hamming_threshold
 
