@@ -1,10 +1,11 @@
-from rbm_torch.utils import utils
-from rbm_torch.analysis import analysis_methods as am
-
 import numpy as np
-
 import torch
 import matplotlib.pyplot as plt
+
+from pool.utils.model_utils import get_beta_and_W
+from pool.utils.graph_utils import sequence_logo, clean_ax
+from pool.utils.alphabet import get_alphabet
+# from pool.analysis import analysis_methods as am
 
 
 def dataframe_to_input(dataframe, base_to_id, v_num, q, weights=False):
@@ -19,6 +20,7 @@ def dataframe_to_input(dataframe, base_to_id, v_num, q, weights=False):
     else:
         return oh_ten
 
+
 # Inputs across the k dimension (separate convolutions, same convolution weight)
 # hidden key is name assigned to hidden layer in convolution topology
 def data_with_weights_plot(crbm, dataframe, hidden_key, hidden_unit_numbers, kdim="mean", data="cgf", data_range=None):
@@ -31,16 +33,16 @@ def data_with_weights_plot(crbm, dataframe, hidden_key, hidden_unit_numbers, kdi
         exit(-1)
 
     # Convert Sequences to one hot encoding Format and Compute Hidden Unit Input
-    base_to_id = am.int_to_letter_dicts[crbm.molecule]
+    base_to_id = get_alphabet(crbm.alphabet)
     data_tensor, weights = dataframe_to_input(dataframe, base_to_id, crbm.v_num, crbm.q, weights=True)
-    input_hiddens = crbm.compute_output_v(data_tensor) # List of Iuk matrices
+    input_hiddens = crbm.compute_output_v(data_tensor)  # List of Iuk matrices
 
     weight_index = crbm.hidden_convolution_keys.index(hidden_key)  # Get index of Weight for accessing input_hiddens list
     input_W_hiddens = input_hiddens[weight_index] # Get the hidden inputs for this particular weight
 
     Wdims = crbm.convolution_topology[hidden_key]["weight_dims"]  # Get dimensions of W matrix
     h_num = Wdims[0]
-    beta, W = utils.get_beta_and_W(crbm, hidden_key, include_gaps=False)   # Get Beta and sort hidden Units by Frobenius Norms
+    beta, W = get_beta_and_W(crbm, hidden_key, include_gaps=False)   # Get Beta and sort hidden Units by Frobenius Norms
     order = np.argsort(beta)[::-1]
 
     if "pool" not in crbm._get_name():
@@ -111,7 +113,7 @@ def data_with_weights_plot(crbm, dataframe, hidden_key, hidden_unit_numbers, kdi
     for hid, hu_num in enumerate(hidden_unit_numbers):
         ix = order[hu_num]  # get hidden units by frobenius norm order (look at get_beta_and_W)
         # Make Sequence Logo
-        utils.sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule=crbm.molecule)
+        sequence_logo(W[ix], ax=axd[f"weight{hid}"], data_type="weights", ylabel=f"Weight #{hu_num}", ticks_every=5, ticks_labels_size=14, title_size=20, molecule=crbm.molecule)
 
         if kdim != "full":
             t_x = np.asarray(range_data[:, ix])
@@ -159,7 +161,7 @@ def data_with_weights_plot(crbm, dataframe, hidden_key, hidden_unit_numbers, kdi
                 axd[f"cgf{hid}_{j}"].yaxis.tick_right()
 
                 if not even and j == convx - 1:  # Last Plot that contains nothing
-                    utils.clean_ax(axd[f"cgf{hid}_{j+1}"])
+                    clean_ax(axd[f"cgf{hid}_{j+1}"])
     plt.show()
 
 
@@ -176,7 +178,7 @@ def flatten_and_reduce_input(Ih, reduction="sum"):
 
 
 def prepare_input_vector(crbm, dataframe):
-    base_to_id = am.int_to_letter_dicts[crbm.molecule]
+    base_to_id = get_alphabet(crbm.alphabet)
     data_tensor, weights = dataframe_to_input(dataframe, base_to_id, crbm.v_num, crbm.q, weights=True)
     input_hiddens = crbm.compute_output_v(data_tensor) # List of Iuk matrices
     return flatten_and_reduce_input(input_hiddens).detach().numpy()

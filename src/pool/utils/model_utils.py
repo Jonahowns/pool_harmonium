@@ -116,9 +116,6 @@ def load_run(runfile):
     return config
 
 
-
-
-
 def configure_optimizer(optimizer_str):
     try:
         return {"SGD": SGD, "AdamW": AdamW, "Adadelta": Adadelta, "Adagrad": Adagrad, "Adam": Adam}[optimizer_str]
@@ -250,6 +247,7 @@ def conv1d_dim(input_shape, conv_topology):
 #             checkpoint_file = os.path.join(checkpoint_dir, file)
 #     return checkpoint_file
 
+
 def get_beta_and_W(model, hidden_key=None, include_gaps=False, separate_signs=False):
     name = model._get_name()
     if "CRBM" in name or "crbm" in name:
@@ -314,9 +312,11 @@ def all_weights(model, name=None, rows=5, order_weights=True):
             ncols = 2
         else:
             ncols = 1
-        fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=ncols, figsize=(7, 5), ticks_every=10, ticks_labels_size=10, title_size=12, dpi=200, molecule=model.molecule)
+        fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=ncols,
+                                figsize=(7, 5), ticks_every=10, ticks_labels_size=10, title_size=12, dpi=200,
+                                alphabet=model.alphabet)
 
-    plt.close() # close all open figures
+    plt.close()  # close all open figures
 
 
 def conv_weights(crbm, hidden_key, name, rows, columns, h, w, order_weights=True):
@@ -325,4 +325,6 @@ def conv_weights(crbm, hidden_key, name, rows, columns, h, w, order_weights=True
         order = np.argsort(beta)[::-1]
     else:
         order = np.arange(0, beta.shape[0], 1)
-    fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=columns, figsize=(h,w) ,ticks_every=5,ticks_labels_size=10,title_size=12, dpi=200, molecule=crbm.molecule)
+    fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=columns, figsize=(h, w),
+                            ticks_every=5, ticks_labels_size=10, title_size=12, dpi=200, alphabet=crbm.alphabet)
+    plt.close()

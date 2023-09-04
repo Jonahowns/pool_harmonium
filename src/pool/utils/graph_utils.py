@@ -230,7 +230,7 @@ def sequence_logo(matrix, ax=None, data_type=None, figsize=None, ylabel=None, ti
         else:
             data_type = 'weights'
 
-    base_list, letters, color_scheme = get_alphabet(alphabet)
+    base_list, letters, color_scheme = graph_data(alphabet)
 
     if data_type == 'mean':
         all_scores = build_scores(matrix, base_list, epsilon=epsilon)
@@ -331,7 +331,7 @@ def sequence_logo_breaks(matrix, data_type=None, selected=None, window=5, theta_
 
     xticks, xticks_labels = ticks_at(selected, ticks_every=ticks_every)
 
-    base_list, letters, color_scheme = get_alphabet(alphabet)
+    base_list, letters, color_scheme = graph_data(alphabet)
 
     if data_type == 'mean':
         all_scores, maxi_size = build_scores_break(matrix, selected, base_list, epsilon=epsilon)

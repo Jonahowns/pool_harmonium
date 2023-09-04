@@ -1,14 +1,7 @@
-# import sys
-# sys.path.append("../")
-
-
 from pool.utils.model_utils import get_beta_and_W
 from pool.utils.alphabet import get_alphabet
 from pool.utils.io import fasta_read
 from pool.utils.graph_utils import sequence_logo_multiple, sequence_logo, sequence_logo_all
-# from rbm_torch.models.rbm import RBM
-# from crbm import CRBM
-# from rbm import RBM
 
 import pandas as pd
 from glob import glob
@@ -27,14 +20,14 @@ from copy import copy
 # Clusters are 1 indexed
 
 
-int_to_letter_dicts = {"protein": utils.aadict, "dna": utils.dnadict, "rna": utils.rnadict}
-
 # Colors Used for Likelihood Plots, can always add / change order
 supported_colors = ["r", "orange", "y", "g", "b", "indigo", "violet", "m", "c", "k", "DarkKhaki", "DarkOrchid", "aqua", "yellowgreen", "aquamarine", "yellow", "beige", "wheat",
                     "chartreuse", "violet", "coral", "turqoise", "crimson", "tomato", "darkblue", "darkgreen", "teal", "fuchsia",
                     "gold", "silver", "sienna", "grey", "indigo", "salmon", "plum", "lavender", "orchid", "lime", "magenta", "navy"]
 
-def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, molecule="protein", normalize_counts=False, drop_duplicates=True): #normalization_denominator=1e6,
+
+def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, alphabet="protein",
+               normalize_counts=False, drop_duplicates=True):  # normalization_denominator=1e6,
     """ Reads fasta files and returns pandas dataframe with their information
 
     Parameters
@@ -46,8 +39,12 @@ def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, molec
         provides a str label for a provided copy number
     threads: int, optional, default: 1
         number of threads to read file with, helpful for large files especially
-    molecule: {"dna", "rna", "protein"}, default="protein"
+    alphabet: {"dna", "rna", "protein"} or dict such as {'A':0, 'B':1, 'C':2}, default="protein"
         specifies type of data
+    normalize_counts: bool, default: False
+        make counts relative to total counts
+    drop_duplicates: bool, default: True
+        Removes duplicate sequences
 
     Returns
     -------
@@ -55,7 +52,7 @@ def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, molec
         contains data from provided fasta files with columns "sequence", "round", "assignment", and "copy_num"
     """
     for xid, x in enumerate(fasta_names):
-        seqs, counts, all_chars, q_data = fasta_read(dir + x + ".fasta", molecule, drop_duplicates=drop_duplicates, threads=threads)
+        seqs, counts, all_chars, q_data = fasta_read(dir + x + ".fasta", alphabet, drop_duplicates=drop_duplicates, threads=threads)
         round_label = [x for i in range(len(seqs))]
         if assignment_function is not None:
             assignment = [assignment_function(i) for i in counts]
@@ -67,24 +64,26 @@ def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, molec
             counts = [x/counts_denom for x in counts]
 
         if xid == 0:
-            data_df = pd.DataFrame({"sequence": seqs, "copy_num": counts, "round": round_label, "assignment": assignment})
+            data_df = pd.DataFrame({"sequence": seqs, "copy_num": counts,
+                                    "round": round_label, "assignment": assignment})
         else:
-            data_df = pd.concat([data_df, pd.DataFrame({"sequence": seqs, "copy_num": counts, "round": round_label, "assignment": assignment})])
+            data_df = pd.concat([data_df, pd.DataFrame({"sequence": seqs, "copy_num": counts,
+                                                        "round": round_label, "assignment": assignment})])
 
     return data_df
 
 
-def get_checkpoint_path(round, version=None, rbmdir="./"):
-    """ Fetches checkpoint file path for trained models specified with round label and optionally the directory
+def get_checkpoint_path(model_name, version=None, model_dir="./"):
+    """ Fetches checkpoint file path for trained models specified with model_name label and optionally the directory
 
     Parameters
     ----------
-    round: str,
+    model_name: str,
         directory name of model
     version: int, optional, default: None
         specify which version of the model to load
         by default it will load the most recent version
-    rbmdir: str, optional, default: ./
+    model_dir: str, optional, default: ./
         base directory where model tensorboard directory is stored
 
     Returns
@@ -94,7 +93,7 @@ def get_checkpoint_path(round, version=None, rbmdir="./"):
     version_dir: str,
         tensorboard directory of target pytorch model
     """
-    ndir = rbmdir + round + "/"
+    ndir = model_dir + model_name + "/"
     if version:
         version_dir = ndir + f"version_{version}/"
     else:   # Get Most recent i.e. highest version number
@@ -110,11 +109,14 @@ def get_checkpoint_path(round, version=None, rbmdir="./"):
 
 
 # Returns dictionary of arrays of likelihoods
-def generate_likelihoods(rounds, model, all_data, identifier, key="round", dir="./generated/", cluster_indx=None, individual_hiddens=False):
+def generate_likelihoods(model, all_data, identifier, key="round", out_dir="./", individual_hiddens=False):
     """ Calculates Likelihood of sequences in provided for the provided model
 
       Parameters
       ----------
+      model: CRBM pytorch object
+      all_data: dataframe with
+          data in
       rounds: list of str,
           must match values of column {key} provided pandas dataframe
       version: int, optional, default: None
@@ -132,38 +134,38 @@ def generate_likelihoods(rounds, model, all_data, identifier, key="round", dir="
       """
     likelihoods, sequences, fit_vals, labels = {}, {}, {}, {}
 
-    for x in rounds:
-        if "net" in model._get_name():
-            if model.use_network:
-                seqs, likeli, fitness_vals = model.predict(all_data[all_data[key] == x])
-                fit_vals[x] = fitness_vals
-            else:
-                seqs, likeli = model.predict(all_data[all_data[key] == x])
-        elif "vr" in model._get_name():
-            seqs, likeli, fitness_vals = model.predict(all_data[all_data[key] == x])
-            fit_vals[x] = fitness_vals
-        elif "class" in model._get_name():
-            seqs, likeli, label_pred = model.predict(all_data[all_data[key] == x])
-            labels[x] = label_pred
-        elif cluster_indx is not None:
-            seqs, likeli = model.predict_cluster(all_data[all_data[key] == x], cluster_indx)
-        else:
-            seqs, likeli = model.predict(all_data[all_data[key] == x], individual_hiddens=individual_hiddens)
+    for x in all_data[key].unique().to_list():
+        # if "net" in model._get_name():
+        #     if model.use_network:
+        #         seqs, likeli, fitness_vals = model.predict(all_data[all_data[key] == x])
+        #         fit_vals[x] = fitness_vals
+        #     else:
+        #         seqs, likeli = model.predict(all_data[all_data[key] == x])
+        # elif "vr" in model._get_name():
+        #     seqs, likeli, fitness_vals = model.predict(all_data[all_data[key] == x])
+        #     fit_vals[x] = fitness_vals
+        # elif "class" in model._get_name():
+        #     seqs, likeli, label_pred = model.predict(all_data[all_data[key] == x])
+        #     labels[x] = label_pred
+        # elif cluster_indx is not None:
+        #     seqs, likeli = model.predict_cluster(all_data[all_data[key] == x], cluster_indx)
+        # else:
+        seqs, likeli = model.predict(all_data[all_data[key] == x], individual_hiddens=individual_hiddens)
         likelihoods[x] = likeli
         sequences[x] = seqs
 
-    if "net" in model._get_name():
-        if model.use_network:
-            data = {'likelihoods': likelihoods, "sequences": sequences, "fitness_vals": fit_vals}
-        else:
-            data = {'likelihoods': likelihoods, "sequences": sequences}
-    elif "vr" in model._get_name():
-        data = {'likelihoods': likelihoods, "sequences": sequences, "fitness_vals": fit_vals}
-    elif "class" in model._get_name():
-        data = {'likelihoods': likelihoods, "sequences": sequences, "labels": labels}
-    else:
-        data = {'likelihoods': likelihoods, "sequences": sequences}
-    out = open(dir+identifier+".json", "w")
+    # if "net" in model._get_name():
+    #     if model.use_network:
+    #         data = {'likelihoods': likelihoods, "sequences": sequences, "fitness_vals": fit_vals}
+    #     else:
+    #         data = {'likelihoods': likelihoods, "sequences": sequences}
+    # elif "vr" in model._get_name():
+    #     data = {'likelihoods': likelihoods, "sequences": sequences, "fitness_vals": fit_vals}
+    # elif "class" in model._get_name():
+    #     data = {'likelihoods': likelihoods, "sequences": sequences, "labels": labels}
+    # else:
+    data = {'likelihoods': likelihoods, "sequences": sequences}
+    out = open(out_dir+identifier+".json", "w")
     json.dump(data, out)
     out.close()
 
@@ -174,8 +176,8 @@ def get_likelihoods(likelihoodfile):
     return data
 
 
-# Plot Likelihoods as kde curves with each round in a new row
 def plot_likelihoods(likeli,  order, labels, weights=None, title=None, xaxislabel="log-likelihood", xlim=None, cdf=False, yscale=None):
+    """Plot Likelihoods as kde curves with each round in a new row"""
     colors = supported_colors
     plot_num = len(order)
     assert len(labels) == plot_num
@@ -208,9 +210,10 @@ def plot_likelihoods(likeli,  order, labels, weights=None, title=None, xaxislabe
         fig.suptitle("Log-Likelihood Gaussian KDE Curve of Likelihoods by Dataset")
     plt.show()
 
-# Plot Likelihoods as kde curves with each round in a new row
+#
 # order must be a list of lists defining what data to plot on each subplot, same for labels
-def plot_likelihoods_multiple(likeli,  order, labels, title=None, xaxislabel="log-likelihood", xlim=None, cdf=False, legend_font_size=10, yscale=None):
+def plot_likelihoods_multiple(likeli, order, labels, title=None, xaxislabel="log-likelihood", xlim=None, cdf=False, legend_font_size=10, yscale=None):
+    """Plot Likelihoods as kde curves with each label in a new row"""
     colors = supported_colors
     plot_num = len(order)
     fig, axs = plt.subplots(plot_num, 1, sharex=True, sharey=False)
@@ -259,8 +262,8 @@ def plot_likelihoods_multiple(likeli,  order, labels, title=None, xaxislabel="lo
     plt.show()
 
 
-# Distribution of Counts inside each experimental dataset
 def count_dist(data_w_counts, title):
+    """Distribution of Counts inside each experimental dataset"""
     fig, axs = plt.subplots(2, 1)
     sns.histplot(data_w_counts, ax=axs[0], x="round", hue="assignment", multiple="stack", palette="rocket", stat="percent")
     sns.histplot(data_w_counts, ax=axs[1], x="round", hue="assignment", multiple="stack", palette="rocket", stat="count")
@@ -268,8 +271,8 @@ def count_dist(data_w_counts, title):
     plt.show()
 
 
-# Likelihoods must be performed on all the same sequences for both rounds
 def compare_likelihood_correlation(likeli1, likeli2, title, rounds):
+    """Likelihoods must be performed on all the same sequences for both rounds"""
     fig, axs = plt.subplots(1, 1)
     axs.scatter(likeli1, likeli2, cmap="plasma", alpha=0.75, marker=".")
     # Fit dashed black line
@@ -282,8 +285,8 @@ def compare_likelihood_correlation(likeli1, likeli2, title, rounds):
     plt.show()
 
 
-# Return dataframe of specific round with entries with likelihood < lmax and > lmin
 def data_subset(data_df, likelihood_dict, target, lmin, lmax):
+    """Return dataframe of specific round with entries with likelihood < lmax and > lmin"""
     tdf = data_df[data_df["round"] == target]
     all_seqs = tdf.sequence.tolist()
     all_counts = tdf.copy_num.tolist()
@@ -291,8 +294,9 @@ def data_subset(data_df, likelihood_dict, target, lmin, lmax):
     seqs, counts, ls = zip(*[(all_seqs[xid], all_counts[xid], x) for xid, x in enumerate(likelihood) if lmin < x < lmax])
     return pd.DataFrame({"sequence": seqs, "copy_num": counts, "likelihood": ls})
 
-# Returns path to generated seq logo png file
+
 def seq_logo(dataframe, output_file, weight=False, outdir=""):
+    """Returns path to generated seq logo png file from external Kplogo program"""
     out = outdir + output_file
     df = dataframe[["sequence", "copy_num"]]
     if df.empty:
@@ -308,11 +312,11 @@ def seq_logo(dataframe, output_file, weight=False, outdir=""):
         return out
 
 
-def view_weights(rbm, type="top", selected=None, molecule="protein", title=None, view="full", remove_gaps=False):
+def view_weights(rbm, type="top", selected=None, alphabet="protein", title=None, view="full", remove_gaps=False):
     beta, W = get_beta_and_W(rbm)
     order = np.argsort(beta)[::-1]
+    # alphabet = get_alphabet(alphabet)
     assert type in ["top", "unordered"]
-    assert molecule in ["protein", "dna", "rna"]
     if type == "top":
         W = W[order]
         if isinstance(selected, int):
@@ -337,7 +341,7 @@ def view_weights(rbm, type="top", selected=None, molecule="protein", title=None,
     if remove_gaps:
         selected_weights[:, :, -1] = 0.
     # Assume we want weights
-    fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
+    fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, alphabet=alphabet)
 
 
 def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="protein", title=None, view="full", ax=None):
@@ -387,7 +391,7 @@ def cgf_with_weights_plot(rbm, dataframe, hidden_unit_numbers):
     # Convert Sequences to Integer Format and Compute Hidden Unit Input
     v_num = rbm.v_num
     h_num = rbm.h_num
-    base_to_id = int_to_letter_dicts[rbm.molecule]
+    base_to_id = get_alphabet(rbm.alphabet)
     data_tensor, weights = dataframe_to_input(dataframe, base_to_id, v_num, weights=True)
     rbm.prep_W()
     input_hiddens = rbm.compute_output_v(data_tensor).detach().numpy()
@@ -507,7 +511,7 @@ def plot_input_mean(RBM, I, hidden_unit_numbers, I_range=None, weights=None, xla
 
 
 def shaded_kde_curve(ax, path, xmin, xmax, color):
-    vertices = [ (x, y) for x, y in path.vertices if xmin < x < xmax]
+    vertices = [(x, y) for x, y in path.vertices if xmin < x < xmax]
     vertices.insert(0, (xmin, 0.))
     vertices.append((xmax, 0.))
     xfill, yfill = zip(*vertices)
@@ -571,9 +575,6 @@ def seqlogo_subplot(ax, path, type="info"):
     img = mpimg.imread(f"{path}.{type}.png")
     ax.imshow(img, interpolation="nearest")
     ax.axis("off")
-    # ax.set_yticks([])
-    # ax.set_yticklabels([])
-    # ax.set_xticklabels([])
 
 
 # bounds listed in ascending orderex. [[-140, -100], [-90, -72]]

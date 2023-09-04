@@ -101,7 +101,7 @@ class Base(LightningModule):
         try:
             torch.set_default_dtype(supported_precisions[self.precision])
         except KeyError:
-            print(f"Precision {self.precision} not supported.")
+            print(f"Precision {self.precision} not supported.", file=sys.stderr)
             sys.exit(-1)
 
         matmul_precisions = {"single": "medium", "double": "high"}
@@ -138,7 +138,6 @@ class Base(LightningModule):
 
         for file in self.fasta_file:
             filepath = os.path.join(self.dataset_directory, file)
-            print(filepath)
             try:
                 # seqs, seq_read_counts, all_chars, q_data = fasta_read(filepath,
                 #                                                       self.alphabet, drop_duplicates=False,
@@ -172,7 +171,6 @@ class Base(LightningModule):
         if type(self.sequence_weights) is np.ndarray:
             all_data["seq_count"] = self.sequence_weights
 
-        print(all_data["sequence"][0], self.v_num)
         assert len(all_data["sequence"][0]) == np.prod(self.v_num)  # make sure v_num is same as data_length
 
         labels = 0  # default fill value
@@ -208,7 +206,6 @@ class Base(LightningModule):
 
         if "fasta" in self.sampling_weights:
             self.sampling_weights = weight_transform(torch.tensor(all_data["fasta_count"].values), self.sampling_weights)
-            print(self.sampling_weights)
 
         if self.sampling_weights is not None:
             self.sampling_weights = self.sampling_weights[train_sets]
@@ -340,7 +337,8 @@ class Base(LightningModule):
                 try:
                     result_dict[key] = torch.stack([x[key] for x in self.training_data_logs]).mean()
                 except RuntimeError:
-                    print('Logging Problems in "on_train_epoch_end"')
+                    print('Logging Problems in "on_train_epoch_end"', file=sys.stderr)
+                    sys.exit(1)
 
         # log values to tensorboard
         self.logger.experiment.add_scalars("Train Scalars", result_dict, self.current_epoch)
@@ -357,7 +355,7 @@ class Base(LightningModule):
             tensor = getattr(self, param_name).clone()
             return tensor.cpu().detach().numpy()
         except KeyError:
-            print(f"Key {param_name} not found")
+            print(f"Key {param_name} not found", file=sys.stderr)
             sys.exit(1)
 
 
