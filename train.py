@@ -1,52 +1,42 @@
+import os
+import argparse
+
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning import Trainer
 
-import argparse
-import os
-
-from rbm_torch.models.crbm_base import CRBM
-from rbm_torch.models.pool_crbm_base import pool_CRBM
-from rbm_torch.models.pool_crbm_relu_base import pool_CRBM_relu
-from rbm_torch.models.pool_crbm_classification import pool_class_CRBM
-from rbm_torch.models.pool_crbm_cluster import pcrbm_cluster
-
-from rbm_torch.utils.utils import load_run
+from pool.utils.model_utils import load_run
+import pool.model
 
 
 def get_model(model_type, config, debug_flag=False):
-    if model_type == "crbm":
-        return CRBM(config, debug=debug_flag, precision=config["precision"])
-    elif model_type == "pool_crbm":
-        return pool_CRBM(config, debug=debug_flag, precision=config["precision"])
-    elif model_type == "pool_crbm_relu":
-        return pool_CRBM_relu(config, debug=debug_flag, precision=config["precision"])
-    elif model_type == "pool_class_crbm":
-        return pool_class_CRBM(config, debug=debug_flag, precision=config["precision"])
-    elif model_type == "pcrbm_cluster":
-        return pcrbm_cluster(config, debug=debug_flag, precision=config["precision"])
-    else:
-        print(f"Model Type {model_type} is not supported")
-        exit(1)
+    return getattr(pool.model, model_type)(config, debug=debug_flag)
 
+
+def get_trainer(config):
+    logger = TensorBoardLogger(config["save_directory"], name=config["name"])
+    if config["gpus"] > 1:
+        # distributed data parallel, multi-gpus on single machine or across multiple machines
+        return Trainer(max_epochs=config['epochs'], logger=logger, gpus=config["gpus"], accelerator="cuda",
+                       strategy="ddp")
+    else:
+        if config['gpus'] == 0:
+            return Trainer(max_epochs=config['epochs'], logger=logger, accelerator="cpu")
+        else:
+            return Trainer(max_epochs=config['epochs'], logger=logger, devices=config["gpus"], accelerator="cuda")
 
 
 # callable from jupyter notebooks etc.
-def train(run_data_dict, debug_flag=False):
-    logger = TensorBoardLogger(run_data_dict['server_model_dir'], name=run_data_dict["model_name"])
-    config = run_data_dict['config']
-
-    model = get_model(run_data_dict["model_type"], config, debug_flag=debug_flag)
-
-    if run_data_dict["gpus"] > 1:
-        # distributed data parallel, multi-gpus on single machine or across multiple machines
-        plt = Trainer(max_epochs=config['epochs'], logger=logger, gpus=run_data_dict["gpus"], accelerator="cuda",
-                      strategy="ddp")  # distributed data-parallel
-    else:
-        if run_data_dict['gpus'] == 0:
-            plt = Trainer(max_epochs=config['epochs'], logger=logger, accelerator="cpu")
-        else:
-            plt = Trainer(max_epochs=config['epochs'], logger=logger, devices=run_data_dict["gpus"],
-                          accelerator="cuda")  # gpus=1,
+def train(config, debug_arg=None):
+    debug_flag = False
+    if debug_arg is not None:
+        debug_flag = True
+        config['gpus'] = 0
+        if debug_arg == 'dg':
+            config['gpus'] = 1
+    model = get_model(config["model_type"], config, debug_flag=debug_flag)
+    if debug_flag:
+        config['gpus']
+    plt = get_trainer(config)
     plt.fit(model)
 
 
@@ -62,31 +52,27 @@ if __name__ == '__main__':
     os.environ["SLURM_JOB_NAME"] = "bash"  # server runs crash without this line (yay raytune)
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1" # For debugging of cuda errors
 
-    run_data, config = load_run(args.runfile)
+    config = load_run(args.runfile)
 
-    debug_flag = False
+    debug_arg = None
     if args.dg in ["true", "True"]:
-        debug_flag = True
-        run_data["gpus"] = 1
+        debug_arg = 'dg'
 
     if args.dc in ["true", "True"]:
-        debug_flag = True
-        run_data["gpus"] = 0
+        debug_arg = 'dc'
 
-    if args.s is not None:
-        config["seed"] = int(args.s)
+    train(config, debug_arg=debug_arg)
 
-    # Training Code
-    model = get_model(run_data["model_type"], config, debug_flag=debug_flag)
-
-    logger = TensorBoardLogger(run_data["server_model_dir"], name=run_data["model_name"])
-
-    if run_data["gpus"] > 1:
-        # distributed data parallel, multi-gpus on single machine or across multiple machines
-        plt = Trainer(max_epochs=config['epochs'], logger=logger, gpus=run_data["gpus"], accelerator="cuda", strategy="ddp")  # distributed data-parallel
-    else:
-        if run_data['gpus'] == 0:
-            plt = Trainer(max_epochs=config['epochs'], logger=logger, accelerator="cpu")
-        else:
-            plt = Trainer(max_epochs=config['epochs'], logger=logger, devices=run_data["gpus"], accelerator="cuda")  # gpus=1,
-    plt.fit(model)
+    # debug_flag = False
+    # if args.dg in ["true", "True"]:
+    #     debug_flag = True
+    #     config['gpus'] = 1
+    #
+    # if args.dc in ["true", "True"]:
+    #     debug_flag = True
+    #     config["gpus"] = 0
+    #
+    # # Training Code
+    # model = get_model(config["model_type"], config, debug_flag=debug_flag)
+    # plt = get_trainer(config)
+    # plt.fit(model)

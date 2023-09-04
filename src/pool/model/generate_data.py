@@ -315,7 +315,6 @@ class DataSampler:
                 return data
 
 
-
 ######### Data Generation Methods #########
 def extract_cluster_crbm_pool(model, hidden_indices):
     tmp_model = copy.deepcopy(model)

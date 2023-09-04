@@ -120,7 +120,7 @@ class Categorical(Dataset):
     # Takes in pd dataframe with 2ces and weights of sequences (key: "sequences", weights: "sequence_count")
     # Also used to calculate the independent fields for parameter fields initialization
     def __init__(self, dataframe, q, weights=None, max_length=20, alphabet='protein', device='cpu',
-                 one_hot=False, labels=False, additional_data=None):
+                 one_hot=False, additional_data=None):
         # Drop Duplicates/ Reset Index from most likely shuffled sequences
         # self.dataset = dataset.reset_index(drop=True).drop_duplicates("sequence")
         self.dataset = dataframe.reset_index(drop=True)
@@ -154,8 +154,8 @@ class Categorical(Dataset):
             self.additional_data = additional_data
 
         # default all equally weighted
-        self.train_weights = np.asarray([1. for x in range(len(self))])
-        if weights is not None:
+        self.train_weights = np.asarray([1. for _ in range(len(self))])
+        if weights not in [None, 'None']:
             if type(weights) is list:
                 self.train_weights = np.asarray(weights)
             elif type(weights) is np.ndarray:

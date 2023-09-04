@@ -1,4 +1,6 @@
 import json
+import sys
+
 import yaml
 import math
 import numpy as np
@@ -10,98 +12,111 @@ from torch.optim import SGD, AdamW, Adagrad, Adadelta, Adam  # Supported Optimiz
 from pool.utils.graph_utils import sequence_logo, sequence_logo_multiple, sequence_logo_all
 
 
+def load_weight_file(data_dir, filename, key, transform=None):
+    try:
+        with open(data_dir + filename) as f:
+            data = json.load(f)
+    except IOError:
+        print(f"Could Not Open File {data_dir+filename}", file=sys.stderr)
+        sys.exit(1)
+
+    n = np.asarray(data[key])
+    if transform is not None:
+        n = weight_transform(n, transform)
+    return n
+
+
+def process_weight_selection(selection, dataset_directory):
+    if selection == 'fasta':
+        return selection
+    elif selection == 'None':
+        return None
+    if type(selection) is dict:
+        return load_weight_file(dataset_directory,
+                               selection['filename'],
+                               selection['key'],
+                                transform=None if 'transform' not in selection else selection['transform'])
+
+    print(f"Sequence Weights must be dict, or str with values 'fasta' or 'None'."
+          f" Received {selection} as input", file=sys.stderr)
+    sys.exit(1)
+
+
+def weight_transform(inp, transform):
+    try:
+        if type(inp) is np.ndarray:
+            if 'exp' in transform:
+                return np.exp(inp)
+            elif "log" in transform:
+                return np.log(inp)
+            else:
+                return inp
+        elif type(inp) is torch.Tensor:
+            if 'exp' in transform:
+                return inp.exp()
+            elif 'log' in transform:
+                return inp.log()
+            else:
+                return inp
+    except NotImplementedError:
+        print(f"Transform {transform} for input type {type(inp)}")
+
+
 def load_run(runfile):
+    # yaml file
     if type(runfile) is str:
         try:
             with open(runfile, "r") as f:
                 run_data = yaml.safe_load(f)
         except IOError:
-            print(f"Runfile {runfile} not found or empty! Please check!")
-            exit(1)
+            print(f"Runfile {runfile} not found or empty! Please check!", file=sys.stderr)
+            sys.exit(1)
+    # dictionary
     elif type(runfile) is dict:
         run_data = runfile
     else:
         print("Unsupported Format for run configuration. Must be filename of json config file or dictionary")
         exit(1)
 
-    general_data = run_data['general']
-    dataset_data = run_data['dataset']
+    config = {}
+    config.update(run_data['general'])
+    config.update(run_data['dataset'])
+    config.update(run_data['model'])
 
+    def process_weight_selection(selection):
+        if selection in ['fasta', 'None']:
+            return selection
 
+        if type(selection) is dict:
+            return load_weight_file(config['data_directory'],
+                                   selection['filename'],
+                                   selection['key'])
 
-    config = run_data["config"]
+        print(f"Sequence Weights must be dict, or str with values 'fasta' or 'None'."
+              f" Received {selection} as input", file=sys.stderr)
+        sys.exit(1)
 
-    data_dir = run_data["data_dir"]
-    fasta_file = run_data["fasta_file"]
-
-    # Deal with weights
-    weights = None
-
-    if "fasta" in run_data["weights"]:
-        weights = run_data["weights"]  # All weights are already in the processed fasta files
-    elif run_data["weights"] is None or run_data["weights"] in ["None", "none", "equal"]:
-        pass
-    else:
-        ## Assumes weight file to be in same directory as our data files.
-        try:
-            with open(run_data["data_dir"]+run_data["weights"]) as f:
-                data = json.load(f)
-
-            weights = np.asarray(data["weights"])
-
-            # Deal with Sampling Weights
-            try:
-                if type(config["sampling_weights"]) is not str:
-                    config["sampling_weights"] = np.asarray(config["sampling_weights"])
-
-                sampling_weights = np.asarray(data["sampling_weights"])
-                config["sampling_weights"] = sampling_weights
-            except KeyError:
-                config['sampling_weights'] = None
-
-        except IOError:
-            print(f"Could not load provided weight file {config['weights']}")
-            exit(-1)
-
-    config["sequence_weights"] = weights
+    config['sequence_weights'] = process_weight_selection(config["sequence_weights_selection"])
+    config['sampling_weights'] = process_weight_selection(config["sampling_weights_selection"])
 
     # Edit config for dataset specific hyperparameters
-    if type(fasta_file) is not list:
-        fasta_file = [fasta_file]
+    if type(config['fasta_file']) is not list:
+        config['fasta_file'] = [config['fasta_file']]
 
-    config["fasta_file"] = [data_dir + f for f in fasta_file]
+    config['seed'] = config['seed_selection']
+    if config['seed'] in ['any', 'None']:
+        config['seed'] = int(np.random.randint(0, 10000, 1)[0])
 
-    seed = np.random.randint(0, 10000, 1)[0]
-    config["seed"] = int(seed)
-    if config["lr_final"] == "None":
-        config["lr_final"] = None
-
-    if "crbm" in run_data["model_type"]:
+    if "CRBM" in config["model_type"]:
         # added since json files don't support tuples
         for key, val in config["convolution_topology"].items():
             for attribute in ["kernel", "dilation", "padding", "stride", "output_padding"]:
-                val[f"{attribute}"] = (val[f"{attribute}x"], val[f"{attribute}y"])
+                val[f"{attribute}"] = tuple(val[f"{attribute}"])
 
-    config["gpus"] = run_data["gpus"]
-    return run_data, config
+    return config
 
 
-def process_weights(weights):
-    if weights is None:
-        return None
-    elif type(weights) == str:
-        if weights == "fasta":  # Assumes weights are in fasta file
-            return "fasta"
-        else:
-            print(f"String Option {weights} not supported")
-            exit(1)
-    elif type(weights) == torch.tensor:
-        return weights.numpy()
-    elif type(weights) == np.ndarray:
-        return weights
-    else:
-        print(f"Provided Weights of type {type(weights)} Not Supported, Must be None, a numpy array, torch tensor, or 'fasta'")
-        exit(1)
+
 
 
 def configure_optimizer(optimizer_str):

@@ -11,53 +11,43 @@ from torch.utils.data import DataLoader
 
 from pool.dataset import Categorical
 from pool.utils.model_utils import conv2d_dim
-from pool.model import BaseRelu
-from pool.model import DataSampler
+from pool.model.base import BaseRelu
+from pool.model.generate_data import DataSampler
 
 
 class PoolCRBMRelu(BaseRelu):
-    def __init__(self, config, debug=False, precision="double", meminfo=False):
-        super().__init__(config, debug=debug, precision=precision)
+    def __init__(self, config, debug=False):
+        super().__init__(config, debug=debug)
 
-        self.mc_moves = config['mc_moves']  # Number of MC samples to take to update hidden and visible configurations
+        mandatory_keys = ['mc_moves', 'sample_type', "l1_2", "lf", "ld", "lgap", "lcorr", "lkd", "convolution_topology"]
 
-        # sample types control whether gibbs sampling, pcd, from the data or parallel tempering from random configs are used
-        # Switches How the training of the RBM is performed
-        self.sample_type = config['sample_type']
+        for key in mandatory_keys:
+            setattr(self, key, config[key])
 
+        assert type(self.mc_moves) is int
         assert self.sample_type in ['gibbs', 'pt', 'pcd']
+        assert type(self.l1_2) is float or type(self.l1_2) is int
+        assert type(self.lf) is float or type(self.l1_2) is int
+        assert type(self.ld) is float or type(self.l1_2) is int
+        assert type(self.lgap) is float or type(self.l1_2) is int
+        assert type(self.lcorr) is float or type(self.l1_2) is int
+        assert type(self.lkd) is float or type(self.l1_2) is int
+        assert type(self.convolution_topology) is dict
 
-        # Regularization Options #
-        ###########################################
-        self.l1_2 = config['l1_2']  # regularization on weights, ex. 0.25
-        self.lf = config['lf']  # regularization on fields, ex. 0.001
-        self.ld = config['ld']  # regularization on distance b/t aligned weights
-        self.lgap = config['lgap'] # regularization on gaps
-        self.lbs = config['lbs']  # regularization to promote using both sides of the weights
-        self.lcorr = config['lcorr']  # regularization on correlation of weights
-        ###########################################
-        self.lkd = config['lkd']
+        # Set visible biases
+        self.weight_initial_amplitude = np.sqrt(0.01 / math.prod(self.v_num))
+        self.register_parameter("fields", nn.Parameter(torch.zeros((*self.v_num, self.q), device=self.device)))
+        self.register_parameter("fields0", nn.Parameter(torch.zeros((*self.v_num, self.q), device=self.device)))
 
-        self.convolution_topology = config["convolution_topology"]
-
-        if type(self.v_num) is int:
-            # Normal dist. times this value sets initial weight values
-            self.weight_initial_amplitude = np.sqrt(0.001 / self.v_num)
-            self.register_parameter("fields", nn.Parameter(torch.zeros((self.v_num, self.q), device=self.device)))
-            self.register_parameter("fields0", nn.Parameter(torch.zeros((self.v_num, self.q), device=self.device)))
-        elif type(self.v_num) is tuple:  # Normal dist. times this value sets initial weight values
-            self.weight_initial_amplitude = np.sqrt(0.01 / math.prod(list(self.v_num)))
-            self.register_parameter("fields", nn.Parameter(torch.zeros((*self.v_num, self.q), device=self.device)))
-            self.register_parameter("fields0", nn.Parameter(torch.zeros((*self.v_num, self.q), device=self.device)))
-
-        self.hidden_convolution_keys = list(self.convolution_topology.keys())
-
+        # Container for pooling elements
         self.pools = []
         self.unpools = []
 
+        self.hidden_convolution_keys = list(self.convolution_topology.keys())
+
         for key in self.hidden_convolution_keys:
             # Set information about the convolutions that will be useful
-            dims = conv2d_dim([self.batch_size, 1, self.v_num, self.q], self.convolution_topology[key])
+            dims = conv2d_dim([self.batch_size, 1, *self.v_num, self.q], self.convolution_topology[key])
             self.convolution_topology[key]["weight_dims"] = dims["weight_shape"]
             self.convolution_topology[key]["convolution_dims"] = dims["conv_shape"]
             self.convolution_topology[key]["output_padding"] = dims["output_padding"]
@@ -110,7 +100,6 @@ class PoolCRBMRelu(BaseRelu):
     def free_energy_h(self, h):
         return self.energy_h(h) - self.logpartition_v(self.compute_output_h(h))
 
-    ##
     def energy(self, v, h, remove_init=False, hidden_sub_index=-1):
         """Total Energy of a given visible and hidden configuration"""
         return self.energy_v(v, remove_init=remove_init) + self.energy_h(h, sub_index=hidden_sub_index, remove_init=remove_init) - self.bidirectional_weight_term(v, h, hidden_sub_index=hidden_sub_index)
@@ -306,7 +295,7 @@ class PoolCRBMRelu(BaseRelu):
 
             outputs.append(out)
             if True in torch.isnan(out):
-                print("hi")
+                print("Nan in hidden unit input")
 
         return outputs
 
@@ -417,8 +406,8 @@ class PoolCRBMRelu(BaseRelu):
         self.val_data_logs.append(batch_out)
         return
 
-    def regularization_terms(self, distance_threshold=0.25):
-        freg = self.lf / (2 * self.v_num * self.q) * getattr(self, "fields").square().sum((0, 1))
+    def regularization_terms(self, distance_threshold=0.0):
+        freg = self.lf / (2 * np.prod(self.v_num) * self.q) * getattr(self, "fields").square().sum((0, 1))
         wreg = torch.zeros((1,), device=self.device)
         dreg = torch.zeros((1,), device=self.device)  # discourages weights that are alike
 
@@ -473,9 +462,10 @@ class PoolCRBMRelu(BaseRelu):
             angles = inner_prod/(w_norms[bat_x] * w_norms[bat_y] + 1e-6)
 
             # threshold
-            angles = angles[angles > distance_threshold]
-
-            dreg += angles.mean()
+            thresh = angles > distance_threshold
+            if thresh.any():
+                angles = angles[angles > distance_threshold]
+                dreg += angles.mean()
 
         dreg *= self.ld
 

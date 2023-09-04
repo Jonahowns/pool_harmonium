@@ -1,3 +1,2 @@
-from base import *
-from pool_crbm_relu import *
-from generate_data import *
+from .pool_crbm_relu import PoolCRBMRelu
+from .dual_crbm_relu import DualCRBMRelu

@@ -70,7 +70,7 @@ dataset:
 model:
   # Must match a class defined in pool.models
   # options are PoolCRBMRelu
-  model_type: PoolCRBMRelu
+  model_type: DualCRBMRelu
   # Number of Sequences per batch
   # Greatly affects memory usage
   batch_size: 20000

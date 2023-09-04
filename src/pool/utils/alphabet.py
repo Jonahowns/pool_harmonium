@@ -44,6 +44,7 @@ letter_to_int_dicts = {"protein": aadict, "dna": dnadict, "rna": rnadict}
 int_to_letter_dicts = {"protein": aadict_inverse, "dna": dnadict_inverse, "rna": rnadict_inverse}
 graph_dicts = {"protein": aagraph, "dna": dnagraph, "rna": rnagraph}
 
+
 def get_alphabet(alphabet, inverse=False, clean=False):
     """returns dict that maps a letter of symbol to an integer"""
     if type(alphabet) is str:
