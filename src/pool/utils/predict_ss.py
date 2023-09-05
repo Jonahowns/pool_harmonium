@@ -91,47 +91,10 @@ def read_data(file, molecule="dna", format="csv"):
 
     return df, no_wildcards
 
-def rnafold_predict_ss_file(file, format="csv", molecule="dna", gquad=True, tempC=25):
-    import RNA
-
-    assert molecule in ["dna", "rna"]
-    df, no_wildcards = read_data(file, molecule=molecule, format=format)
-
-    secondary_structures, energies = [], []
-
-    # Set model details
-    md = RNA.md()
-    # md.dangles = 2
-    # md.noLonelyPairs = 0
-    md.temperature = tempC
-    md.gquad = gquad
-    md.noGU = True if molecule == "dna" else False
-
-    if molecule == "dna":
-        RNA.params_load_DNA_Mathews2004()
-    else:
-        RNA.params_load_RNA_Langdon2018()
-
-    RNA.cvar.temperature = md.temperature  # Global setting of temperature
-    # RNA.cvar.dangles = md.dangles  # Global setting of dangles
-    RNA.cvar.gquad = md.gquad  # Global setting of gquad
-    RNA.cvar.noGU = md.noGU  # Global setting of G/U base pairs
-
-    # create new fold_compound object
-    for seq in no_wildcards:
-        fc = RNA.fold_compound(seq)
-        # compute minimum free energy (mfe) and corresponding structure
-        (ss, mfe) = fc.mfe()
-        secondary_structures.append(ss)
-        energies.append(mfe)
-
-    df["ss"] = secondary_structures
-    df["mfe"] = energies
-    outfilename = file.split("/")[-1].split('.')[0] + "_sspred.csv"
-    df.to_csv(outfilename)
 
 def rnafold_predict_ss(seqs, molecule="dna", gquad=True, tempC=25):
     import RNA
+    assert molecule in ["dna", "rna"]
     secondary_structures, energies = [], []
 
     # Set model details
@@ -167,6 +130,16 @@ def rnafold_predict_ss(seqs, molecule="dna", gquad=True, tempC=25):
 
     return energies, secondary_structures
 
+
+def rnafold_predict_ss_file(file, format="csv", molecule="dna", gquad=True, tempC=25):
+    df, no_wildcards = read_data(file, molecule=molecule, format=format)
+
+    energies, secondary_structures = rnafold_predict_ss(no_wildcards, molecule=molecule, gquad=gquad, tempC=tempC)
+
+    df["ss"] = secondary_structures
+    df["mfe"] = energies
+    outfilename = file.split("/")[-1].split('.')[0] + "_rna_sspred.csv"
+    df.to_csv(outfilename)
 
 
 if __name__ == "__main__":

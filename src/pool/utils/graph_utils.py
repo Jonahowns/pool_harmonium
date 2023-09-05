@@ -207,18 +207,18 @@ globscale = 1.35
 
 def graph_data(alphabet):
     alphabet_dict = get_alphabet(alphabet, clean=True)
+    letters = [x if x != '-' else '$\\boxminus$' for x in alphabet_dict.keys()]
+    letters_graph = dict([(letter, TextPath((-0.30, 0), letter, size=1, prop=fp)) for letter in letters])
+
     # color scheme
     if alphabet is str:  # preset alphabets
         if alphabet == "protein":
-            color_scheme = dict([(letter, aa_color(letter)) for letter in alphabet_dict.keys()])
+            color_scheme = dict([(letter, aa_color(letter)) for letter in letters])
         else:
-            color_scheme = dict([(letter, nuc_color(letter)) for letter in alphabet_dict.keys()])
+            color_scheme = dict([(letter, nuc_color(letter)) for letter in letters])
     # generic alphabet
     else:
-        color_scheme = dict([(letter, generic_color(index)) for letter, index in alphabet_dict.items()])
-
-    letters = [x if x != '-' else '$\\boxminus$' for x in alphabet_dict.keys()]
-    letters_graph = dict([(letter, TextPath((-0.30, 0), letter, size=1, prop=fp)) for letter in letters])
+        color_scheme = dict([(letter, generic_color(index)) for letter, index in letters])
     return letters, letters_graph, color_scheme
 
 

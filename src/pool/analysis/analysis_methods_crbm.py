@@ -8,12 +8,13 @@ from pool.utils.alphabet import get_alphabet
 # from pool.analysis import analysis_methods as am
 
 
-def dataframe_to_input(dataframe, base_to_id, v_num, q, weights=False):
+def dataframe_to_input(dataframe, alphabet, v_num, q, weights=False):
+    alphabet = get_alphabet(alphabet)
     seqs = dataframe["sequence"].tolist()
     oh_ten = torch.zeros((len(seqs), v_num, q), dtype=torch.long)
     for iid, seq in enumerate(seqs):
         for n, base in enumerate(seq):
-            oh_ten[iid, n, base_to_id[base]] = 1
+            oh_ten[iid, n, alphabet[base]] = 1
     if weights:
         weights = dataframe["copy_num"].tolist()
         return oh_ten, weights

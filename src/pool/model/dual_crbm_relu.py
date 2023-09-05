@@ -17,7 +17,8 @@ class DualCRBMRelu(PoolCRBMRelu):
 
             # for 1d
             # weight_size = (out_channels, input_channels, kernel)
-            self.convolution_topology[key]["weight2_dims"] = (c1_shape[1], c1_shape[1], c1_shape[2])
+            # self.convolution_topology[key]["weight2_dims"] = (c1_shape[1], c1_shape[1], c1_shape[2])
+            self.convolution_topology[key]["weight2_dims"] = (c1_shape[1], c1_shape[2])
 
             self.register_parameter(f"{key}_W2", nn.Parameter(
                 self.weight_initial_amplitude * torch.randn(self.convolution_topology[key]["weight2_dims"],
@@ -32,12 +33,13 @@ class DualCRBMRelu(PoolCRBMRelu):
                             padding=self.convolution_topology[i]["padding"],
                             dilation=self.convolution_topology[i]["dilation"]).squeeze(3)
 
-            out = F.conv1d(conv, getattr(self, f"{i}_W2"), stride=1, padding=0, dilation=1)
+            out = (conv*getattr(self, f"{i}_W2")).sum(-1)
+            # out = F.conv1d(conv, getattr(self, f"{i}_W2"), stride=1, padding=0, dilation=1)
 
             if self.dr > 0.:
                 out = F.dropout(out, p=self.dr, training=self.training)
 
-            out.squeeze_(2)
+            # out.squeeze_(2)
 
             outputs.append(out)
             if True in torch.isnan(out):
@@ -52,9 +54,10 @@ class DualCRBMRelu(PoolCRBMRelu):
         """Compute Input for Visible Layer from Hidden dReLU"""
         outputs = []
         for iid, i in enumerate(self.hidden_convolution_keys):
-            reconst = F.conv_transpose1d(h[iid].unsqueeze(2), getattr(self, f'{i}_W2'), stride=1, padding=0,
-                                         output_padding=0, dilation=1)
+            # reconst = F.conv_transpose1d(h[iid].unsqueeze(2), getattr(self, f'{i}_W2'), stride=1, padding=0,
+            #                              output_padding=0, dilation=1)
 
+            reconst = (h[iid].unsqueeze(2)*getattr(self, f"{i}_W2").unsqueeze(0))
             # reconst = self.unpools[iid](h[iid].view_as(self.max_inds[iid]), self.max_inds[iid])
 
             if reconst.ndim == 3:

@@ -26,14 +26,14 @@ supported_colors = ["r", "orange", "y", "g", "b", "indigo", "violet", "m", "c", 
                     "gold", "silver", "sienna", "grey", "indigo", "salmon", "plum", "lavender", "orchid", "lime", "magenta", "navy"]
 
 
-def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, alphabet="protein",
+def fetch_data(fasta_names, directory="./", assignment_function=None, threads=1, alphabet="protein",
                normalize_counts=False, drop_duplicates=True):  # normalization_denominator=1e6,
     """ Reads fasta files and returns pandas dataframe with their information
 
     Parameters
     ----------
     fasta_names: list of str, file names of the target fasta files, don't include extensions
-    dir: str, optional, default: ./
+    directory: str, optional, default: ./
         directory where fasta files are located
     assignment_function: function, optional, default: None
         provides a str label for a provided copy number
@@ -52,12 +52,12 @@ def fetch_data(fasta_names, dir="./", assignment_function=None, threads=1, alpha
         contains data from provided fasta files with columns "sequence", "round", "assignment", and "copy_num"
     """
     for xid, x in enumerate(fasta_names):
-        seqs, counts, all_chars, q_data = fasta_read(dir + x + ".fasta", alphabet, drop_duplicates=drop_duplicates, threads=threads)
+        seqs, counts, all_chars, q_data = fasta_read(directory + x + ".fasta", alphabet, drop_duplicates=drop_duplicates, threads=threads)
         round_label = [x for i in range(len(seqs))]
         if assignment_function is not None:
             assignment = [assignment_function(i) for i in counts]
         else:
-            assignment = ["N/A" for i in counts]
+            assignment = ["N/A" for _ in counts]
 
         if normalize_counts:
             counts_denom = sum(counts) #/normalization_denominator
@@ -108,9 +108,9 @@ def get_checkpoint_path(model_name, version=None, model_dir="./"):
     return y, version_dir
 
 
-# Returns dictionary of arrays of likelihoods
 def generate_likelihoods(model, all_data, identifier, key="round", out_dir="./", individual_hiddens=False):
-    """ Calculates Likelihood of sequences in provided for the provided model
+    """ Calculates Likelihood of sequences in provided for the provided model. Save results to json file of name
+    identifier.json
 
       Parameters
       ----------
@@ -176,7 +176,8 @@ def get_likelihoods(likelihoodfile):
     return data
 
 
-def plot_likelihoods(likeli,  order, labels, weights=None, title=None, xaxislabel="log-likelihood", xlim=None, cdf=False, yscale=None):
+def plot_likelihoods(likeli,  order, labels, weights=None, title=None,
+                     xaxislabel="log-likelihood", xlim=None, cdf=False, yscale=None):
     """Plot Likelihoods as kde curves with each round in a new row"""
     colors = supported_colors
     plot_num = len(order)
