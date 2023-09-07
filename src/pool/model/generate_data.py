@@ -60,7 +60,7 @@ class DataSampler:
             v[i], htmp = self.model.markov_step(v[i], beta=beta)
             for hid in range(self.model.h_layer_num):
                 h[hid][i] = htmp[hid]
-            e[i] = self.model.energy(v[i], h, hidden_sub_index=i)
+            e[i] = self.model.energy(v[i], h, hidden_sub_index=i, beta=beta)
 
         if self.record_swaps:
             particle_id = torch.arange(N_PT).unsqueeze(1).expand(N_PT, v.shape[1])
@@ -147,7 +147,7 @@ class DataSampler:
                         (log_Z_init + log_weights).mean(), (log_Z_init + log_weights).std() / np.sqrt(M)))
 
                 config[0], config[1] = self.model.markov_step(config[0], beta=betas[i])
-                energy = self.model.energy(config[0], config[1])
+                energy = self.model.energy(config[0], config[1], beta=betas[i])
                 log_weights += -(betas[i] - betas[i - 1]) * energy
 
             log_Z_AIS = (log_Z_init + log_weights).mean()
@@ -183,7 +183,7 @@ class DataSampler:
                 config = [self.model.random_init_config_v(custom_size=(N_PT, batches)),
                           self.model.random_init_config_h(custom_size=(N_PT, batches))]
 
-            energy = self.model.energy_PT(config[0], config[1], N_PT)
+            energy = self.model.energy_PT(config[0], config[1], N_PT, beta=beta)
             for _ in range(Nthermalize):
                 config[0], config[1], energy = self.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
                 if update_betas:
@@ -212,9 +212,9 @@ class DataSampler:
                 for hid in range(self.model.h_layer_num):
                     data_gen_h[hid][0] = clone[hid]
 
+            energy = self.model.energy_PT(config[0], config[1], N_PT, beta=beta)
             for n in range(Ndata - 1):
                 for _ in range(Nstep):
-                    energy = self.model.energy_PT(config[0], config[1], N_PT)
                     config[0], config[1], energy = self.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
                     if update_betas:
                         self.update_betas(N_PT, beta=beta)

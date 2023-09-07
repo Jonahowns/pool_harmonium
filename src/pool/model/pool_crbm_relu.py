@@ -93,26 +93,30 @@ class PoolCRBMRelu(BaseRelu):
         super().on_train_start()
         self.data_sampler.set_device(self.device)
 
-    def free_energy(self, v):
-        return self.energy_v(v) - self.logpartition_h(self.compute_output_v(v))
+    def free_energy(self, v, beta=1):
+        return self.energy_v(v, beta=beta) - self.logpartition_h(self.compute_output_v(v), beta=beta)
 
-    def free_energy_ind(self, v):
+    def free_energy_ind(self, v, beta=1):
         """Free energy contribution frome each hidden node"""
-        h_ind = self.logpartition_h_ind(self.compute_output_v(v))
-        return (self.energy_v(v)/h_ind.shape[1]).unsqueeze(1) - h_ind
+        h_ind = self.logpartition_h_ind(self.compute_output_v(v), beta=beta)
+        return (self.energy_v(v, beta=beta)/h_ind.shape[1]).unsqueeze(1) - h_ind
 
     def free_energy_h(self, h):
         return self.energy_h(h) - self.logpartition_v(self.compute_output_h(h))
 
-    def energy(self, v, h, remove_init=False, hidden_sub_index=-1):
+    def energy(self, v, h, beta=1, remove_init=False, hidden_sub_index=-1):
         """Total Energy of a given visible and hidden configuration"""
-        return self.energy_v(v, remove_init=remove_init) + self.energy_h(h, sub_index=hidden_sub_index, remove_init=remove_init) - self.bidirectional_weight_term(v, h, hidden_sub_index=hidden_sub_index)
+        return self.energy_v(v, beta=beta, remove_init=remove_init) + \
+            self.energy_h(h, sub_index=hidden_sub_index, beta=beta, remove_init=remove_init) \
+            - self.bidirectional_weight_term(v, h, hidden_sub_index=hidden_sub_index)
 
-    def energy_PT(self, v, h, N_PT, remove_init=False):
+    def energy_PT(self, v, h, N_PT, beta=1, remove_init=False):
         """Total Energy of N_PT given visible and hidden configurations"""
         E = torch.zeros((N_PT, v.shape[1]), device=self.device)
         for i in range(N_PT):
-            E[i] = self.energy_v(v[i], remove_init=remove_init) + self.energy_h(h, sub_index=i, remove_init=remove_init) - self.bidirectional_weight_term(v[i], h, hidden_sub_index=i)
+            E[i] = self.energy_v(v[i], beta=beta, remove_init=remove_init) + \
+                   self.energy_h(h, sub_index=i, beta=beta, remove_init=remove_init) \
+                   - self.bidirectional_weight_term(v[i], h, hidden_sub_index=i)
         return E
 
     def bidirectional_weight_term(self, v, h, hidden_sub_index=-1):
@@ -141,19 +145,17 @@ class PoolCRBMRelu(BaseRelu):
             output.append(torch.maximum(I - theta, torch.tensor(0, device=self.device)) / gamma)
         return output
 
-    def energy_v(self, visible_config, remove_init=False):
+    def energy_v(self, visible_config, beta=1, remove_init=False):
         """Computes -g(si) term of potential"""
         v = visible_config.type(torch.get_default_dtype())
         E = torch.zeros(visible_config.shape[0], device=self.device)
-        for i in range(self.q):
-            if remove_init:
-                E -= v[:, :, i].dot(getattr(self, "fields")[:, i] - getattr(self, "fields0")[:, i])
-            else:
-                E -= v[:, :, i].matmul(getattr(self, "fields")[:, i])
-
+        if remove_init:
+            E -= (v[:] * (getattr(self, "fields") - getattr(self, "fields0"))).sum((2, 1))
+        else:
+            E -= (v[:] * (beta * getattr(self, "fields") + (1-beta) * getattr(self, "fields0"))).sum((2, 1))
         return E
 
-    def energy_h(self, hidden_config, remove_init=False, sub_index=-1):
+    def energy_h(self, hidden_config, beta=1, sub_index=-1, remove_init=False):
         """Computes U(h) term of potential"""
         # hidden_config is list of h_uks
         if sub_index != -1:
@@ -166,15 +168,15 @@ class PoolCRBMRelu(BaseRelu):
                 gamma = getattr(self, f'{i}_gamma').sub(getattr(self, f'{i}_0gamma')).unsqueeze(0)
                 theta = getattr(self, f'{i}_theta').sub(getattr(self, f'{i}_0theta')).unsqueeze(0)
             else:
-                gamma = getattr(self, f'{i}_gamma').unsqueeze(0)
-                theta = getattr(self, f'{i}_theta').unsqueeze(0)
+                gamma = (beta * getattr(self, f'{i}_gamma') + (1 - beta) * getattr(self, f'{i}_0gamma')).unsqueeze(0)
+                theta = (beta * getattr(self, f'{i}_theta') + (1 - beta) * getattr(self, f'{i}_0theta')).unsqueeze(0)
 
             if sub_index != -1:
                 con = hidden_config[iid][sub_index]
             else:
                 con = hidden_config[iid]
 
-            E[iid] = ((con.square() * gamma) / 2 + (con * theta)).sum(1)
+            E[iid] = (con.square() * gamma).sum(-1) / 2 + (con * theta).sum(-1)
 
         if E.shape[0] > 1:
             return E.sum(0)
@@ -243,10 +245,7 @@ class PoolCRBMRelu(BaseRelu):
 
     def logpartition_v(self, inputs, beta=1):
         """Marginal over visible units"""
-        if beta == 1:
-            return torch.logsumexp(getattr(self, "fields")[None, :, :] + inputs, 2).sum(1)
-        else:
-            return torch.logsumexp((beta * getattr(self, "fields") + (1 - beta) * getattr(self, "fields0"))[None, :] + beta * inputs, 2).sum(1)
+        return torch.logsumexp((beta * getattr(self, "fields") + (1 - beta) * getattr(self, "fields0"))[None, :] + beta * inputs, 2).sum(1)
 
     def mean_h(self, psi, hidden_key=None, beta=1):
         """Mean of hidden layer specified by hidden_key"""
@@ -257,13 +256,9 @@ class PoolCRBMRelu(BaseRelu):
 
         means = []
         for kid, key in enumerate(self.hidden_convolution_keys):
-            if beta == 1:
-                gamma = (getattr(self, f'{key}_gamma')).unsqueeze(0)
-                theta = (getattr(self, f'{key}_theta')).unsqueeze(0)
-            else:
-                theta = (beta * getattr(self, f'{key}_theta') + (1 - beta) * getattr(self, f'{key}_0theta')).unsqueeze(0)
-                gamma = (beta * getattr(self, f'{key}_gamma') + (1 - beta) * getattr(self, f'{key}_0gamma')).unsqueeze(0)
-                psi[kid] *= beta
+            theta = (beta * getattr(self, f'{key}_theta') + (1 - beta) * getattr(self, f'{key}_0theta')).unsqueeze(0)
+            gamma = (beta * getattr(self, f'{key}_gamma') + (1 - beta) * getattr(self, f'{key}_0gamma')).unsqueeze(0)
+            psi[kid] *= beta
 
             sqrt_gamma = torch.sqrt(gamma)
             means.append((psi[kid] - theta) / gamma + 1. / self.erf_times_gauss((-psi[kid] + theta) / sqrt_gamma) / sqrt_gamma)
@@ -325,10 +320,7 @@ class PoolCRBMRelu(BaseRelu):
 
     def sample_from_inputs_v(self, psi, beta=1):  # Psi ohe (Batch_size, v_num, q)   fields (self.v_num, self.q)
         """Gibbs Sampling of Potts Visbile Layer"""
-        if beta == 1:
-            cum_probas = psi + getattr(self, "fields").unsqueeze(0)
-        else:
-            cum_probas = beta * psi + beta * getattr(self, "fields").unsqueeze(0) + (1 - beta) * getattr(self, "fields0").unsqueeze(0)
+        cum_probas = beta * psi + beta * getattr(self, "fields").unsqueeze(0) + (1 - beta) * getattr(self, "fields0").unsqueeze(0)
 
         maxi, max_indices = cum_probas.max(-1)
         maxi.unsqueeze_(2)
@@ -343,13 +335,9 @@ class PoolCRBMRelu(BaseRelu):
         """Gibbs Sampling of ReLU hidden layer"""
         h_uks = []
         for iid, i in enumerate(self.hidden_convolution_keys):
-            if beta == 1:
-                gamma = getattr(self, f'{i}_gamma').unsqueeze(0)
-                theta = getattr(self, f'{i}_theta').unsqueeze(0)
-            else:
-                theta = (beta * getattr(self, f'{i}_theta') + (1 - beta) * getattr(self, f'{i}_0theta')).unsqueeze(0)
-                gamma = (beta * getattr(self, f'{i}_gamma') + (1 - beta) * getattr(self, f'{i}_0gamma')).unsqueeze(0)
-                psi[iid] *= beta
+            theta = (beta * getattr(self, f'{i}_theta') + (1 - beta) * getattr(self, f'{i}_0theta')).unsqueeze(0)
+            gamma = (beta * getattr(self, f'{i}_gamma') + (1 - beta) * getattr(self, f'{i}_0gamma')).unsqueeze(0)
+            psi[iid] *= beta
 
             if nancheck:
                 nans = torch.isnan(psi[iid])
