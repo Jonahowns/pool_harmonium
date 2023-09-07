@@ -24,6 +24,15 @@ class DualCRBMRelu(PoolCRBMRelu):
                 self.weight_initial_amplitude * torch.randn(self.convolution_topology[key]["weight2_dims"],
                                                             device=self.device)))
 
+    def on_before_backward(self, loss):
+        """ clip parameters to acceptable values """
+        for key in self.hidden_convolution_keys:
+            getattr(self, f"{key}_gamma").data.clamp_(min=0.05, max=2.0)
+            getattr(self, f"{key}_theta").data.clamp_(min=0.0, max=2.0)
+            getattr(self, f"{key}_W").data.clamp_(-1.0, 1.0)
+            getattr(self, f"{key}_W2").data.clamp_(0, 1.0)
+
+
     def compute_output_v(self, X):
         """Compute Input for Hidden Layer from Visible Potts, Uses one hot vector"""
         outputs = []

@@ -134,7 +134,7 @@ def generate_likelihoods(model, all_data, identifier, key="round", out_dir="./",
       """
     likelihoods, sequences, fit_vals, labels = {}, {}, {}, {}
 
-    for x in all_data[key].unique().to_list():
+    for x in all_data[key].unique().tolist():
         # if "net" in model._get_name():
         #     if model.use_network:
         #         seqs, likeli, fitness_vals = model.predict(all_data[all_data[key] == x])

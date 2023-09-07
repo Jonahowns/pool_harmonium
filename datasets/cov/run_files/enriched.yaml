@@ -11,20 +11,20 @@ general:
   # Where to save the model, same rules apply as for data_directory
   save_directory: ./datasets/cov/trained/
   # How many gpus?
-  gpus: 0
+  gpus: 1
   # precision single or double, doesn't seem to effect end model so single is much faster
   precision: single
   # Set Pytorch seed for reproducible runs, or set to 'any', 'None'
   seed_selection: 0
   # Number of training iterations
-  epochs: 1000
+  epochs: 500
 
 # =================================================================
 # Dataset Information
 # =================================================================
 dataset:
   # The sequence file, must be in fasta format
-  fasta_file: ["cov_z_ss_g.fasta"]
+  fasta_file: ["cov_enriched.fasta"]
   # Number of dataworkers to use, Too many = too much memory, too few = slower performance
   # Usually 2-4 is perfect
   data_worker_num: 2
@@ -75,7 +75,7 @@ model:
   # Greatly affects memory usage
   batch_size: 20000
   # Number of sampling iterations for each iteration to generate negative data
-  mc_moves: 3
+  mc_moves: 1
   # How to perform Sampling of negative data
   # Can be Persistent Contrastive Divergence (pcd), Gibbs Sampling (gibbs), or Parallel Tempering (pt)
   # Parallel Tempering is slower and uses much more memory
@@ -84,17 +84,17 @@ model:
 
   # Regularization Options
   # Minimizes learning of gap positions in weights
-  lgap: 1.05
+  lgap: 10.05
   # l1 ^2 penalty on learned weights, promotes sparsity etc.
-  l1_2: 20.0
+  l1_2: 50.0
   # Penalty on visible biases ('fields')
-  lf: 10.0
+  lf: 20.0
   # I don't remember
-  lcorr: 50.0
+  lcorr: 10
   # Promotes weights to be different. Penalizes similar weights (after alignment)
-  ld: 0.5
+  ld: 10
   # Standard Deviation Loss
-  lkd: 5.0
+  lkd: 0.2
   # Dropout percentage on hidden unit input
   dr: 0.0
 
@@ -102,9 +102,9 @@ model:
   # which optimizer must be Adam, AdamW, SGD
   optimizer: AdamW
   # Weight decay on optimizer
-  weight_decay: 0.0
+  weight_decay: 0.01
   # learning rate
-  lr: 0.004
+  lr: 0.001
   # Final Learning Rate
   # What should learning rate decay to? None sets final learning rate to lr*1e-2
   lr_final: None

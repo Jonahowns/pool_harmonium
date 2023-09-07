@@ -3,13 +3,14 @@ import time
 import types
 import numpy as np
 from copy import copy
+import inspect
 
 
 class DataSampler:
-    def __init__(self, pool_crbm, device=torch.device('cpu'), **kwargs):
+    def __init__(self, pool_crbm, **kwargs):
 
         self.model = pool_crbm
-        self.device = device
+        self.device = torch.device('cpu')
 
         self.record_acceptance = False
         self.record_swaps = False
@@ -18,23 +19,41 @@ class DataSampler:
         self.last_at_zero = None
         self.trip_duration = None
 
+        N_PT = 5
+        self.betas = torch.arange(N_PT, device=self.device) / (N_PT - 1)
+        self.betas = self.betas.flip(0)
+
+        self.update_betas_lr = 0.025
+        self.update_betas_lr_decay = 0.99
+
         for k, v in kwargs:
             setattr(self, k, v)
 
-    def update_betas(self, N_PT, beta=1, update_betas_lr=0.1, update_betas_lr_decay=1):
-        with torch.no_grad():
-            stiffness = torch.maximum(1 - (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()),
-                                           torch.zeros_like(self.mav_acceptance_rates, device=self.device)) \
-                                      + 1e-4 * torch.ones(N_PT - 1)
-            diag = stiffness[0:-1] + stiffness[1:]
-            offdiag_g = -stiffness[1:-1]
-            offdiag_d = -stiffness[1:-1]
-            M = torch.diag(offdiag_g, -1) + torch.diag(diag, 0) + torch.diag(offdiag_d, 1)
+    def set_device(self, device):
+        self.device = torch.device(device)
+        for i in inspect.getmembers(self):
+            # to remove private and protected functions
+            if not i[0].startswith('_'):
+                # To remove other functions
+                if not inspect.ismethod(i[1]):
+                    if type(i[1]) is torch.Tensor:
+                        setattr(self, i[0], i[1].to(self.device))
+        # self.betas = self.betas.to(self.device)
 
-            B = torch.zeros(N_PT - 2, device=self.device)
-            B[0] = stiffness[0] * beta
-            self.betas[1:-1] = self.betas[1:-1] * (1 - update_betas_lr) + update_betas_lr * torch.linalg.solve(M, B)
-            update_betas_lr *= update_betas_lr_decay
+    def update_betas(self, N_PT, beta=1):
+        with torch.no_grad():
+            if self.acceptance_rates.mean() > 0:
+                stiffness = torch.maximum(1 - (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()),
+                                               torch.zeros_like(self.mav_acceptance_rates, device=self.device)) \
+                                          + 1e-4 * torch.ones(N_PT - 1, device=self.device)
+                diag = stiffness[0:-1] + stiffness[1:]
+                offdiag_g = -stiffness[1:-1]
+                offdiag_d = -stiffness[1:-1]
+                M = torch.diag(offdiag_g, -1) + torch.diag(diag, 0) + torch.diag(offdiag_d, 1)
+
+                B = torch.zeros(N_PT - 2, device=self.device)
+                B[0] = stiffness[0] * beta
+                self.betas[1:-1] = self.betas[1:-1] * (1 - self.update_betas_lr) + self.update_betas_lr * torch.linalg.solve(M, B)
 
     def markov_PT_and_exchange(self, v, h, e, N_PT):
         for i, beta in zip(torch.arange(N_PT), self.betas):
@@ -48,7 +67,7 @@ class DataSampler:
 
         betadiff = self.betas[1:] - self.betas[:-1]
         for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
-            proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i]))
+            proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i], device=self.device))
             swap = torch.rand(proba.shape[0], device=self.device) < proba
             if i > 0:
                 v[i:i + 2, swap] = torch.flip(v[i - 1: i + 1], [0])[:, swap]
@@ -77,18 +96,16 @@ class DataSampler:
         self.count_swaps += 1
         return v, h, e
 
-    def AIS(self, M=10, n_betas=10000, batches=None, verbose=0, beta_type='adaptive'):
+    def AIS(self, M=20, n_betas=20000, batches=None, verbose=1, beta_type='adaptive'):
         with torch.no_grad():
             if beta_type == 'linear':
-                betas = torch.arange(n_betas, device=self.device) / torch.tensor(n_betas - 1, dtype=torch.float64,
-                                                                                 device=self.device)
+                betas = torch.arange(n_betas, device=self.device) / (n_betas-1)
             elif beta_type == 'root':
-                betas = torch.sqrt(torch.arange(n_betas, device=self.device)) / \
-                        torch.tensor(n_betas - 1, dtype=torch.float64, device=self.device)
+                betas = torch.sqrt(torch.arange(n_betas, device=self.device)) / (n_betas-1)
             elif beta_type == 'adaptive':
-                Nthermalize = 200
-                Nchains = 20
-                N_PT = 11
+                Nthermalize = 500
+                Nchains = 50
+                N_PT = 20
                 # adaptive_PT_lr = 0.05
                 # adaptive_PT_decay = True
                 # adaptive_PT_lr_decay = 10 ** (-1 / float(Nthermalize))
@@ -166,11 +183,12 @@ class DataSampler:
                 config = [self.model.random_init_config_v(custom_size=(N_PT, batches)),
                           self.model.random_init_config_h(custom_size=(N_PT, batches))]
 
+            energy = self.model.energy_PT(config[0], config[1], N_PT)
             for _ in range(Nthermalize):
-                energy = self.model.energy_PT(config[0], config[1], N_PT)
-                config[0], config[1], energy = self.model.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
+                config[0], config[1], energy = self.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
                 if update_betas:
                     self.update_betas(N_PT, beta=beta)
+                    self.update_betas_lr *= self.update_betas_lr_decay
 
             # if record_replica:
             #     data = [config[0].clone().unsqueeze(0), self.model.clone_h(config[1], expand_dims=[0])]
@@ -197,9 +215,10 @@ class DataSampler:
             for n in range(Ndata - 1):
                 for _ in range(Nstep):
                     energy = self.model.energy_PT(config[0], config[1], N_PT)
-                    config[0], config[1], energy = self.model.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
+                    config[0], config[1], energy = self.markov_PT_and_exchange(config[0], config[1], energy, N_PT)
                     if update_betas:
                         self.update_betas(N_PT, beta=beta)
+                        self.update_betas_lr *= self.update_betas_lr_decay
 
 
                 if record_replica:
@@ -289,9 +308,13 @@ class DataSampler:
                 visible_data = self.model.random_init_config_v(custom_size=(Nchains, N_PT, Lchains), zeros=True)
                 hidden_data = self.model.random_init_config_h(custom_size=(Nchains, N_PT, Lchains), zeros=True)
                 data = [visible_data, hidden_data]
+            else:
+                visible_data = self.model.random_init_config_v(custom_size=(Nchains, Lchains), zeros=True)
+                hidden_data = self.model.random_init_config_h(custom_size=(Nchains, Lchains), zeros=True)
+                data = [visible_data, hidden_data]
 
             if config_init is not []:
-                if type(config_init) == torch.tensor:
+                if type(config_init) == torch.Tensor:
                     h_layer = self.model.random_init_config_h()
                     config_init = [config_init, h_layer]
 
@@ -302,7 +325,6 @@ class DataSampler:
 
                 config = self._gen_data(Nthermalize, Ndata, Nstep, N_PT=N_PT, batches=batches, reshape=False,
                                         beta=beta, record_replica=record_replica, update_betas=update_betas)
-
 
                 if record_replica:
                     data[0][batches * i:batches * (i + 1)] = torch.swapaxes(config[0], 0, 2).clone()
@@ -527,3 +549,64 @@ def markov_step_zeroT_marginal(self, v,beta=1):
     nv = self.transform_v(I)
     return nv, h
 
+
+
+if __name__ == '__main__':
+    # Directory of Stored CRBMs
+    mdir = "/home/jonah/PycharmProjects/pool_harmonium/datasets/cov/trained/"
+    runfile = "/home/jonah/PycharmProjects/pool_harmonium/datasets/cov/run_files/enriched_dual.yaml"
+
+    from pool.utils import model_utils
+    from pool.analysis import analysis_methods as am
+    from pool.model import PoolCRBMRelu
+    import json
+    config = model_utils.load_run(runfile)
+    rounds = [config["name"]]
+
+    train_fastas = config["fasta_file"]
+    if type(train_fastas) is list:
+        data_keys = [x.split(".")[0] for x in train_fastas]
+    else:
+        data_keys = [train_fastas.split(".")[0]]
+
+    # Get's checkpoint and directory for latest version of the trained model
+    checkp, version_dir = am.get_checkpoint_path(rounds[0], model_dir=mdir)  # , version=25)
+
+    # load crbm
+    # ncrbm = DualCRBMRelu.load_from_checkpoint(checkp)
+    ncrbm = PoolCRBMRelu.load_from_checkpoint(checkp)
+    ncrbm.data_worker_num = 0
+    ncrbm.eval()
+
+    ncrbm.data_sampler.set_device('cuda')
+
+    # Put all data into dictionary
+    # dir(s) is location of fasta file used during training
+    # optional assignment for
+    all_data = am.fetch_data(data_keys, directory="../../../datasets/cov/data/", alphabet=ncrbm.alphabet, assignment_function=None,
+                             threads=12)
+
+    # Assign data to train, valid, testy under round column
+    # Generated during model training
+    with open(version_dir + "dataset_indices.json", "r") as json_file:
+        di = json.load(json_file)
+
+    print("Total Sequences:", all_data.index.__len__())
+
+    new_rounds = np.full((all_data.index.__len__()), "valid")
+    new_rounds[di["train_indices"]] = "train"
+    new_rounds[di["test_indices"]] = "testy"
+
+    all_data["round"] = new_rounds.tolist()
+    # %% md
+    # Get Likelihoods From Model
+    # %%
+    # calculate likelihoods and fitness values
+
+    # device = torch.device("cpu")
+    # ncrbm.to(device)
+    # ncrbm.eval()
+
+    am.generate_likelihoods(ncrbm, all_data, f"cov_likelihoods", key='round', out_dir="./generated")
+    # am.generate_likelihoods(ncrbm, all_data, f"cov_likelihoods_ind", key='round', out_dir="./generated",
+    #                         individual_hiddens=True)

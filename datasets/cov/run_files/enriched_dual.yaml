@@ -75,7 +75,7 @@ model:
   # Greatly affects memory usage
   batch_size: 20000
   # Number of sampling iterations for each iteration to generate negative data
-  mc_moves: 3
+  mc_moves: 1
   # How to perform Sampling of negative data
   # Can be Persistent Contrastive Divergence (pcd), Gibbs Sampling (gibbs), or Parallel Tempering (pt)
   # Parallel Tempering is slower and uses much more memory
@@ -84,17 +84,17 @@ model:
 
   # Regularization Options
   # Minimizes learning of gap positions in weights
-  lgap: 1.05
+  lgap: 10.0
   # l1 ^2 penalty on learned weights, promotes sparsity etc.
-  l1_2: 5.0
+  l1_2: 15.0
   # Penalty on visible biases ('fields')
   lf: 10.0
   # Covariance of hidden units
-  lcorr: 0.0
+  lcorr: 1.0
   # Promotes weights to be different. Penalizes similar weights (after alignment)
-  ld: 0.0
+  ld: 1.0
   # Standard Deviation Loss
-  lkd: 2.0
+  lkd: 0.0
   # Dropout percentage on hidden unit input
   dr: 0.0
 
@@ -102,9 +102,9 @@ model:
   # which optimizer must be Adam, AdamW, SGD
   optimizer: AdamW
   # Weight decay on optimizer
-  weight_decay: 0.002
+  weight_decay: 0.001
   # learning rate
-  lr: 0.000005
+  lr: 0.001
   # Final Learning Rate
   # What should learning rate decay to? None sets final learning rate to lr*1e-2
   lr_final: None

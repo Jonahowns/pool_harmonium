@@ -218,7 +218,7 @@ def graph_data(alphabet):
             color_scheme = dict([(letter, nuc_color(letter)) for letter in letters])
     # generic alphabet
     else:
-        color_scheme = dict([(letter, generic_color(index)) for letter, index in letters])
+        color_scheme = dict([(letter, generic_color(index)) for index, letter in enumerate(letters)])
     return letters, letters_graph, color_scheme
 
 

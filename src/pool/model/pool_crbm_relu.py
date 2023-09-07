@@ -27,11 +27,11 @@ class PoolCRBMRelu(BaseRelu):
         assert type(self.mc_moves) is int
         assert self.sample_type in ['gibbs', 'pt', 'pcd']
         assert type(self.l1_2) is float or type(self.l1_2) is int
-        assert type(self.lf) is float or type(self.l1_2) is int
-        assert type(self.ld) is float or type(self.l1_2) is int
-        assert type(self.lgap) is float or type(self.l1_2) is int
-        assert type(self.lcorr) is float or type(self.l1_2) is int
-        assert type(self.lkd) is float or type(self.l1_2) is int
+        assert type(self.lf) is float or type(self.lf) is int
+        assert type(self.ld) is float or type(self.ld) is int
+        assert type(self.lgap) is float or type(self.lgap) is int
+        assert type(self.lcorr) is float or type(self.lcorr) is int
+        assert type(self.lkd) is float or type(self.lkd) is int
         assert type(self.convolution_topology) is dict
 
         # Set visible biases
@@ -73,7 +73,7 @@ class PoolCRBMRelu(BaseRelu):
         self.save_hyperparameters()
 
         # Initialize AIS/PT members
-        self.data_sampler = DataSampler(self, device=self.device)
+        self.data_sampler = DataSampler(self)
         self.log_Z_AIS = None
         self.log_Z_AIS_std = None
 
@@ -88,6 +88,10 @@ class PoolCRBMRelu(BaseRelu):
     @property
     def h_layer_num(self):
         return len(self.hidden_convolution_keys)
+
+    def on_train_start(self):
+        super().on_train_start()
+        self.data_sampler.set_device(self.device)
 
     def free_energy(self, v):
         return self.energy_v(v) - self.logpartition_h(self.compute_output_v(v))
@@ -180,9 +184,9 @@ class PoolCRBMRelu(BaseRelu):
     def random_init_config_v(self, custom_size=False, zeros=False):
         """Random Config of Visible Potts States"""
         if custom_size:
-            size = (*custom_size, self.v_num, self.q)
+            size = (*custom_size, *self.v_num, self.q)
         else:
-            size = (self.batch_size, self.v_num, self.q)
+            size = (self.batch_size, *self.v_num, self.q)
 
         if zeros:
             return torch.zeros(size, device=self.device)
@@ -387,8 +391,8 @@ class PoolCRBMRelu(BaseRelu):
     def on_before_backward(self, loss):
         """ clip parameters to acceptable values """
         for key in self.hidden_convolution_keys:
-            getattr(self, f"{key}_gamma").data.clamp_(min=0.05)
-            getattr(self, f"{key}_theta").data.clamp_(min=0.0)
+            getattr(self, f"{key}_gamma").data.clamp_(min=0.05, max=2.0)
+            getattr(self, f"{key}_theta").data.clamp_(min=0.0, max=2.0)
             getattr(self, f"{key}_W").data.clamp_(-1.0, 1.0)
 
     def validation_step(self, batch, batch_idx):
@@ -406,7 +410,7 @@ class PoolCRBMRelu(BaseRelu):
         self.val_data_logs.append(batch_out)
         return
 
-    def regularization_terms(self, distance_threshold=0.0):
+    def regularization_terms(self, distance_threshold=0.4):
         freg = self.lf / (2 * np.prod(self.v_num) * self.q) * getattr(self, "fields").square().sum((0, 1))
         wreg = torch.zeros((1,), device=self.device)
         dreg = torch.zeros((1,), device=self.device)  # discourages weights that are alike
@@ -653,7 +657,7 @@ class PoolCRBMRelu(BaseRelu):
         data_loader = DataLoader(
             reader,
             batch_size=self.batch_size,
-            num_workers=self.worker_num,  # Set to 0 if debug = True
+            num_workers=self.data_worker_num,  # Set to 0 if debug = True
             pin_memory=False,
             shuffle=False
         )
