@@ -65,8 +65,8 @@ class PoolCRBMRelu(BaseRelu):
             self.register_parameter(f"{key}_theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device)))
             self.register_parameter(f"{key}_gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device)))
             # Used in PT Sampling / AIS
-            self.register_parameter(f"{key}_0theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
-            self.register_parameter(f"{key}_0gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
+            self.register_parameter(f"{key}_0theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device), requires_grad=True))
+            self.register_parameter(f"{key}_0gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=True))
 
         # Saves Our hyperparameter options into the checkpoint file generated for Each Run of the Model
         # i.e. Simplifies loading a model that has already been run
@@ -331,20 +331,13 @@ class PoolCRBMRelu(BaseRelu):
         dist = torch.distributions.categorical.Categorical(probs=cum_probas)
         return F.one_hot(dist.sample(), self.q)
 
-    def sample_from_inputs_h(self, psi, nancheck=False, beta=1):  # psi is a list of hidden [input]
+    def sample_from_inputs_h(self, psi, beta=1):  # psi is a list of hidden [input]
         """Gibbs Sampling of ReLU hidden layer"""
         h_uks = []
         for iid, i in enumerate(self.hidden_convolution_keys):
             theta = (beta * getattr(self, f'{i}_theta') + (1 - beta) * getattr(self, f'{i}_0theta')).unsqueeze(0)
             gamma = (beta * getattr(self, f'{i}_gamma') + (1 - beta) * getattr(self, f'{i}_0gamma')).unsqueeze(0)
             psi[iid] *= beta
-
-            if nancheck:
-                nans = torch.isnan(psi[iid])
-                if nans.max():
-                    nan_unit = torch.nonzero(nans.max(0))[0]
-                    print('NAN IN INPUT')
-                    print('Hidden units', nan_unit)
 
             sqrt_gamma = torch.sqrt(gamma)
             I_plus = (-psi[iid] + theta) / sqrt_gamma
