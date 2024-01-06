@@ -23,7 +23,7 @@ class Base(LightningModule):
         mandatory_keys = ['seed',  'gpus', 'precision', 'batch_size', 'epochs', 'fasta_file', 'v_num', 'q', 'alphabet',
                           'data_worker_num', 'optimizer', 'lr', 'lr_final', 'weight_decay', 'decay_after', 'dr',
                           'sampling_strategy', 'validation_set_size', 'test_set_size', 'dataset_directory',
-                          'sequence_weights_selection',  'sampling_weights_selection']
+                          'sequence_weights_selection',  'sampling_weights_selection', 'overide_q_mismatch_warning']
         for key in mandatory_keys:
             setattr(self, key, config[key])
 
@@ -38,6 +38,7 @@ class Base(LightningModule):
         assert type(self.data_worker_num) is int
         assert type(self.sequence_weights_selection) is dict or type(self.sequence_weights_selection) is str
         assert type(self.sampling_weights_selection) is dict or type(self.sampling_weights_selection) is str
+        assert type(self.overide_q_mismatch_warning) is bool
 
         self.sequence_weights = process_weight_selection(self.sequence_weights_selection, self.dataset_directory)
         self.sampling_weights = process_weight_selection(self.sampling_weights_selection, self.dataset_directory)
@@ -127,6 +128,11 @@ class Base(LightningModule):
         self.test_data = None
         self.dataset_indices = None
 
+    def reset_seq_weights(self):
+        self.sequence_weights = process_weight_selection(self.sequence_weights_selection, self.dataset_directory)
+        self.sampling_weights = process_weight_selection(self.sampling_weights_selection, self.dataset_directory)
+
+
     def setup(self, stage=None):
         """Loads Data to be trained from provided fasta file. Splits into sets and manages weights."""
         data_pds = []
@@ -139,13 +145,9 @@ class Base(LightningModule):
         for file in self.fasta_file:
             filepath = os.path.join(self.dataset_directory, file)
             try:
-                # seqs, seq_read_counts, all_chars, q_data = fasta_read(filepath,
-                #                                                       self.alphabet, drop_duplicates=False,
-                #                                                       threads=threads)
-
-                seqs, seq_read_counts = fasta_read_basic(filepath, seq_read_counts=True, drop_duplicates=True)
-                q_data = 5
-                all_chars = []
+                seqs, seq_read_counts, all_chars, q_data = fasta_read(filepath,
+                                                                      self.alphabet, drop_duplicates=False,
+                                                                      threads=threads)
 
             except IOError:
                 print(f"Provided Fasta File '{filepath}' Not Found", file=sys.stderr)
@@ -153,10 +155,11 @@ class Base(LightningModule):
                 sys.exit(1)
 
             if q_data != self.q:
-                print(
-                    f"State Number mismatch! Expected q={self.q}, in dataset q={q_data}. "
-                    f"All observed chars: {all_chars}", file=sys.stderr)
-                sys.exit(1)
+                if not self.overide_q_mismatch_warning and q_data < self.q:
+                    print(
+                        f"State Number mismatch! Expected q={self.q}, in dataset q={q_data}. "
+                        f"All observed chars: {all_chars}", file=sys.stderr)
+                    sys.exit(1)
 
             data = pd.DataFrame(data={'sequence': seqs, 'fasta_count': seq_read_counts})
 
@@ -204,8 +207,13 @@ class Base(LightningModule):
         self.training_data = all_data.iloc[train_sets]
         self.validation_data = all_data.iloc[val_sets]
 
-        if "fasta" in self.sampling_weights:
-            self.sampling_weights = weight_transform(torch.tensor(all_data["fasta_count"].values), self.sampling_weights)
+        if type(self.sampling_weights) is str:
+            if 'fasta' in self.sampling_weights:
+                self.sampling_weights = weight_transform(torch.tensor(all_data["fasta_count"].values),
+                                                         self.sampling_weights)
+            else:
+                print(f"Sampling Weight Option {self.sampling_weights} not supported!")
+                sys.exit(1)
 
         if self.sampling_weights is not None:
             self.sampling_weights = self.sampling_weights[train_sets]

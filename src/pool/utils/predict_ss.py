@@ -53,9 +53,9 @@ def nupack_predict_ss_file(file, format="csv", molecule="dna", ensemble="stackin
     outfilename = file.split("/")[-1].split('.')[0] + "_sspred.csv"
     df.to_csv(outfilename)
 
-def nupack_predict_ss(seqs, molecule="dna", ensemble="stacking", celsius=25, sodium=0.157, magnesium=0.03):
+def nupack_predict_ss(seqs, molecule="dna", ensemble="stacking", celsius=25, sodium=0.157, magnesium=0.03, forward_primer='', reverse_primer=''):
     no_wildcards = [seq if "N" not in seq and "-" not in seq else False for seq in seqs]
-    strands = [Strand(seq, name=str(i)) for i, seq in enumerate(no_wildcards)]
+    strands = [Strand(forward_primer+seq+reverse_primer, name=str(i)) for i, seq in enumerate(no_wildcards)]
     model = Model(material=molecule.upper(), celsius=celsius, sodium=sodium, magnesium=magnesium)
     batch_size = 1
     total_batches = math.ceil(len(strands) / batch_size)
@@ -92,7 +92,7 @@ def read_data(file, molecule="dna", format="csv"):
     return df, no_wildcards
 
 
-def rnafold_predict_ss(seqs, molecule="dna", gquad=True, tempC=25):
+def rnafold_predict_ss(seqs, molecule="dna", gquad=True, tempC=25, forward_primer='', reverse_primer=''):
     import RNA
     assert molecule in ["dna", "rna"]
     secondary_structures, energies = [], []
@@ -122,7 +122,7 @@ def rnafold_predict_ss(seqs, molecule="dna", gquad=True, tempC=25):
             energies.append(0.)
             secondary_structures.append("".join(["." for x in range(len(no_end_gaps))]))
         else:
-            fc = RNA.fold_compound(seq)
+            fc = RNA.fold_compound(forward_primer+seq+reverse_primer)
             # compute minimum free energy (mfe) and corresponding structure
             (ss, mfe) = fc.mfe()
             secondary_structures.append(ss)

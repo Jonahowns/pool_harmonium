@@ -31,6 +31,18 @@ def seq_to_cat(seqs, alphabet="protein"):
     base_to_id = get_alphabet(alphabet)
     return torch.tensor(list(map(lambda x: [base_to_id[y] for y in x], seqs)), dtype=torch.long)
 
+# return matrix that can be graphed as a sequence logo, using sequence_logo in graph_utils
+def dataframe_to_matrix(dataframe, alphabet='dna', key='sequence'):
+    df = dataframe[[key, "copy_num"]]
+    mat_tensor = seq_to_cat(df[key].tolist(), alphabet)
+
+    final_mat = np.full((mat_tensor.shape[1], len(alphabet)), 0.0)
+    for j in range(mat_tensor.shape[1]): # v
+        for k in range(len(alphabet)):  # q
+            final_mat[j, k] = (mat_tensor[:, j] == k).sum()
+
+    final_mat /= mat_tensor.shape[0]
+    return final_mat
 
 def cat_to_one_hot(cat_seqs, q):
     """ takes a categorical vector and returns its one hot encoded representation"""

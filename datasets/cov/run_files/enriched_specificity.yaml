@@ -1,0 +1,131 @@
+# =================================================================
+# General Information
+# =================================================================
+general:
+  # Run Name, will be used to save model in the save_directory
+  name: cov_spec_enriched
+  # Training instances, can be used to train multiple models simultaneously
+  training_instances: 1
+  # Directory where data is
+  # Absolute path may be needed for slurm etc.
+  # If Relative path, make relative to parent directory pool_harmonium
+  dataset_directory: ./datasets/cov/data/
+  # Where to save the model, same rules apply as for data_directory
+  save_directory: ./datasets/cov/trained/
+  # How many gpus?
+  gpus: 1
+  # precision single or double, doesn't seem to effect end model so single is much faster
+  precision: single
+  # Set Pytorch seed for reproducible runs, or set to 'any', 'None'
+  seed_selection: 0
+  # Number of training iterations
+  epochs: 500
+  # Mod
+
+# =================================================================
+# Dataset Information
+# =================================================================
+dataset:
+  # The sequence file, must be in fasta format
+  fasta_file: ["cov_enriched.fasta"]
+  # Number of dataworkers to use, Too many = too much memory, too few = slower performance
+  # Usually 2-4 is perfect
+  data_worker_num: 2
+  # Mapping from Base (char) to integer. Can be dictionary {"A":0, "B": 1, "C": 2}
+  # Or a provided mapping, input str must be: 'dna', 'protein', 'rna'
+  alphabet: dna
+  #Number of possible states for each base, for ex. dictionary above it would be 3
+  q: 5
+  overide_q_mismatch_warning: False
+  # visible units, must equal the length of each datapoint/sequence
+  v_num: 40
+  # fraction of dataset to use for a test set
+  test_set_size: 0.1
+  # fraction of remaining dataset to use as validation
+  validation_set_size: 0.15
+  # Sequences can be weighted by a provided json file or from value in fasta file
+  # For equal weighted use None
+  # If file, must be in data directory
+  #nsequence_weights: {"filename": "weights.json", "key": "weights"}
+  sequence_weights_selection: None
+
+  # Options for sampling from provided data
+  # Options: random, weighted, stratified, stratified_weighted
+  # Random: The default option. All sequences are trained, with each batch containing a random subset of sequences
+  # Weighted: Sequences are sampled WITH replacement from a distribution with each sequence weighted by sampling_weights
+  # Stratified: Each batch consists of sequences from each label group as specified in label_spacing. The amount
+  # of each label_group in the batch is controlled by group_fraction
+  # Stratified Weighted: Describe...
+  sampling_strategy: weighted
+  # Must be None or fasta, only used if weighted or stratified_weighted is used
+  # Can be fasta to use the
+  sampling_weights_selection: fasta
+  # Only used if a stratified sampling_strategy is chosen
+  # Using a provided list, it separates the sequences using their weights
+  label_spacing: [0.0, 6.0]
+  # Set the fraction of each subset to be present in a batch
+  label_fraction: [ 1.0 ]
+  # Only used for weighted/weighted stratified, defines how many batches of sampled sequences
+  sample_multiplier: 50
+
+# =================================================================
+# Model Information
+# =================================================================
+model:
+  # Must match a class defined in pool.models
+  # options are PoolCRBMRelu
+  model_type: PCRSpecificity
+  # Number of Sequences per batch
+  # Greatly affects memory usage
+  batch_size: 20000
+  # Number of sampling iterations for each iteration to generate negative data
+  mc_moves: 1
+  # How to perform Sampling of negative data
+  # Can be Persistent Contrastive Divergence (pcd), Gibbs Sampling (gibbs), or Parallel Tempering (pt)
+  # Parallel Tempering is slower and uses much more memory
+  sample_type: pcd
+
+  # Mandatory Key for specificity
+  sfrac: 0.95
+  exps: 5.0
+  # Regularization Options
+  # Minimizes learning of gap positions in weights
+  lgap: 0.0
+  # l1 ^2 penalty on learned weights, promotes sparsity etc.
+  l1_2: 1.0
+  # Penalty on visible biases ('fields')
+  lf: 200.0
+  # Penalty on covariance of hidden unit input
+  lcov: 1.0
+  # Promotes weights to be different. Penalizes similar weights (after alignment)
+  ld: 1.0
+  # Standard Deviation Loss
+  ls: 1.0
+  # Dropout percentage on hidden unit input
+  dr: 0.0
+  # Optimizer Options
+  # which optimizer must be Adam, AdamW, SGD
+  optimizer: AdamW
+  # Weight decay on optimizer
+  weight_decay: 0.01
+  # learning rate
+  lr: 0.0005
+  # Final Learning Rate
+  # What should learning rate decay to? None sets final learning rate to lr*1e-2
+  lr_final: 0.00005
+  # When should final learning rate be reached (on epoch decay_after*epochs)?
+  decay_after: 0.75
+
+  # Defines the Model's convolution parameters, Can use multiple sets of different sizes and parameters
+  convolution_topology:
+    # this is a name for the convolution set
+    hidden_25:
+      # number of hidden units
+      number: 100
+      # Convolution Size
+      kernel: [35, 5]
+      # Other Convolution Parameters
+      stride: [1, 1]
+      padding: [0, 0]
+      dilation: [1, 1]
+      output_padding: [0, 0]

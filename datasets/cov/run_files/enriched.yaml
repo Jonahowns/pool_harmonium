@@ -89,15 +89,14 @@ model:
   l1_2: 50.0
   # Penalty on visible biases ('fields')
   lf: 20.0
-  # I don't remember
-  lcorr: 10
+  # Penalty on covariance of hidden unit input
+  lcov: 10
   # Promotes weights to be different. Penalizes similar weights (after alignment)
-  ld: 10
+  ld: 20
   # Standard Deviation Loss
-  lkd: 0.2
+  ls: 0.7
   # Dropout percentage on hidden unit input
-  dr: 0.0
-
+  dr: 0.05
   # Optimizer Options
   # which optimizer must be Adam, AdamW, SGD
   optimizer: AdamW

@@ -11,6 +11,7 @@ from matplotlib.textpath import TextPath
 from matplotlib.ticker import FormatStrFormatter
 
 from pool.utils.alphabet import get_alphabet
+from pool.utils.seq_utils import dataframe_to_matrix
 
 # Implementation inspired from https://stackoverflow.com/questions/42615527/sequence-logos-in-matplotlib-aligning-xticks
 # Color choice inspired from: http://weblogo.threeplusone.com/manual.html
@@ -536,7 +537,7 @@ def sequence_logo_all(matrix, name='all_Sequence_logo.pdf', nrows=5, ncols=2, da
             title_ = title[i * plots_per_page:min(plots_per_page * (i + 1), n_plots)]
         else:
             title_ = title
-        fig = sequence_logo_multiple(matrix[plots_per_page * i:min(plots_per_page * (i + 1), n_plots)],
+        fig = sequence_logo_multiple_hist(matrix[plots_per_page * i:min(plots_per_page * (i + 1), n_plots)],
                                      data_type=data_type, figsize=figsize, ylabel=ylabel_, title=title_, epsilon=epsilon,
                                      ncols=ncols, show=False, count_from=plots_per_page * i, ticks_every=ticks_every,
                                      ticks_labels_size=ticks_labels_size, title_size=title_size, alphabet=alphabet)
@@ -548,4 +549,109 @@ def sequence_logo_all(matrix, name='all_Sequence_logo.pdf', nrows=5, ncols=2, da
         os.system(command)
 
     images[0].save(name, "PDF", resolution=100.0, save_all=True, append_images=images[1:])
-    return 'done'
+    return
+
+
+
+
+def sequence_logo_multiple_hist(matrix, hist_data, data_type=None, figsize=None, ylabel=None, title=None, epsilon=1e-4, ncols=1,
+                           show=True, count_from=0, ticks_every=1, ticks_labels_size=14, title_size=20,
+                           alphabet='protein', hist_proportion=0.1, hist_x="log_enrichment", hist_y="count", hist_bins=100):
+    if data_type is None:
+        if matrix.min() >= 0:
+            data_type = 'mean'
+        else:
+            data_type = 'weights'
+
+    N_plots = matrix.shape[0]
+    nrows = int(np.ceil(N_plots / float(ncols)))
+
+    # ncols *= 2 # for hist
+
+    if figsize is None:
+        figsize = (max(int(0.3 * matrix.shape[1]), 2), 3)
+
+    figsize = (figsize[0] * (ncols + hist_proportion), figsize[1] * nrows)
+    fig, ax = plt.subplots(nrows, ncols*2, figsize=figsize)
+    N_plots *= 2
+    if ylabel is None:
+        if data_type == 'mean':
+            ylabel = 'Conservation (bits)'
+        elif data_type == 'weights':
+            ylabel = 'Weights'
+    if type(ylabel) == str:
+        ylabels = [ylabel + ' #%s' % i for i in range(1 + count_from, N_plots + count_from + 1)]
+    else:
+        ylabels = ylabel
+
+    if title is None:
+        title = ''
+    if type(title) == str:
+        titles = [title for _ in range(N_plots)]
+    else:
+        titles = title
+
+    for i in range(N_plots//2):
+        ax_ = get_ax(ax, i, nrows, ncols)
+
+        sequence_logo(matrix[i], ax=ax_, data_type=data_type, ylabel=ylabels[i], title=titles[i],
+                      epsilon=epsilon, show=False, ticks_every=ticks_every, ticks_labels_size=ticks_labels_size,
+                      title_size=title_size, alphabet=alphabet)
+
+        hist_ax = get_ax(ax, i+1, nrows, ncols)
+        hist_ax.hist(hist_data[i], bins=hist_bins)
+        hist_ax.set_yscale("log")
+        hist_ax.set_xlabel(hist_x)
+        hist_ax.set_ylabel(hist_y)
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def cluster_logo_and_hist(dataframe, cluster_number, cluster_key="cluster", hist_key="enrichment",
+                           name='all_Sequence_logo.pdf', nrows=5, ncols=2, data_type=None, figsize=None, ylabel=None,
+                           title=None, epsilon=1e-4, ticks_every=5, ticks_labels_size=14, title_size=20, dpi=100,
+                           alphabet='protein', hist_x="log enrichment", hist_y="counts", hist_bins=100):
+
+    hist_data = [dataframe[dataframe[cluster_key] == r][hist_key] for r in range(cluster_number)]
+    seq_logo_data = [dataframe_to_matrix(dataframe[dataframe[cluster_key] == r]) for r in range(cluster_number)]
+
+    matrix = np.concatenate(seq_logo_data)
+    if data_type is None:
+        if matrix.min() >= 0:
+            data_type = 'mean'
+        else:
+            data_type = 'weights'
+    n_plots = matrix.shape[0]
+    plots_per_page = nrows * ncols
+    n_pages = int(np.ceil(n_plots / float(plots_per_page)))
+    rng = np.random.randn(1)[0]  # avoid file conflicts in case of multiple threads.
+    mini_name = name[:-4]
+    images = []
+    for i in range(n_pages):
+        if type(ylabel) == list:
+            ylabel_ = ylabel[i * plots_per_page:min(plots_per_page * (i + 1), n_plots)]
+        else:
+            ylabel_ = ylabel
+        if type(title) == list:
+            title_ = title[i * plots_per_page:min(plots_per_page * (i + 1), n_plots)]
+        else:
+            title_ = title
+        fig = sequence_logo_multiple_hist(matrix[plots_per_page * i:min(plots_per_page * (i + 1), n_plots)],
+                                          hist_data[plots_per_page * i:min(plots_per_page * (i + 1), n_plots)],
+                                          data_type=data_type, figsize=figsize, ylabel=ylabel_, title=title_, epsilon=epsilon,
+                                          ncols=ncols, show=False, count_from=plots_per_page * i, ticks_every=ticks_every,
+                                          ticks_labels_size=ticks_labels_size, title_size=title_size, alphabet=alphabet,
+                                          hist_bins=hist_bins, hist_x=hist_x, hist_y=hist_y)
+        file = f"tmp_{rng}_#{i}.jpg"
+        fig.savefig(mini_name + file, dpi=dpi)
+        fig.clear()
+        images.append(Image.open(mini_name + file))
+        command = 'rm ' + mini_name + file
+        os.system(command)
+
+    images[0].save(name, "PDF", resolution=100.0, save_all=True, append_images=images[1:])
+    return
+

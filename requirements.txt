@@ -12,3 +12,5 @@ argparse
 Pillow
 tbparse
 ViennaRNA
+tmap
+faerun

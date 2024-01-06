@@ -13,7 +13,7 @@ import pandas as pd
 import seaborn as sns
 import numpy as np
 
-from pool.utils.io import fasta_read_basic, gunter_read, csv_read, write_fasta
+from pool.utils.io import fasta_read_basic, gunter_read, csv_read, write_fasta, dataframe_to_fasta
 
 
 def enrichment_average(df, label_names, min_diff=1, max_diff=None, diff_weights=None, label_weights=None):
@@ -353,3 +353,21 @@ def prepare_data_files(length_indices, gap_indices, master_df, target_dir, chara
                 r_seqs = [x.replace(key, value) for x in r_seqs]
         extractor(r_seqs, r_copynum, length_indices, outdir=target_dir+label,
                   uniform_length=True, position_indx=gap_indices)
+
+
+def generate_enrichment_fasta(dataframe, r1, r2, out_directory, round_key='round', count_key='copy_num'):
+    """creates fasta file with common seqs and their enrichments b/t two rounds of provided dataframe.
+    Works out of the box with the fetch_data function in analysis.analysis_methods.
+
+    assumes copy number is normalized
+
+    Returns the name of the generated file"""
+
+    df1 = dataframe[dataframe[round_key] == r1]
+    df2 = dataframe[dataframe[round_key] == r2]
+
+    merged = pd.merge(df1, df2, how='inner', left_on='sequence', right_on='sequence')
+    merged['enrichment'] = merged[f"{count_key}_y"]/merged[f"{count_key}_x"]
+    out_file_name = f'{r2}_{r1}.fasta'
+    dataframe_to_fasta(merged, os.path.join(out_directory, out_file_name), count_key='enrichment', sequence_key='sequence')
+    return out_file_name

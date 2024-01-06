@@ -250,7 +250,7 @@ def conv1d_dim(input_shape, conv_topology):
 
 def get_beta_and_W(model, hidden_key=None, include_gaps=False, separate_signs=False):
     name = model._get_name()
-    if "CRBM" in name or "crbm" in name:
+    if hasattr(model, "hidden_convolution_keys"): # CRBM of some sort
         if hidden_key is None:
             print("Must specify hidden key in get_beta_and_W for crbm")
             exit(-1)
@@ -268,7 +268,7 @@ def get_beta_and_W(model, hidden_key=None, include_gaps=False, separate_signs=Fa
                     return np.sqrt((W ** 2).sum(-1).sum(-1)), W
                 else:
                     return np.sqrt((W[:, :, :-1] ** 2).sum(-1).sum(-1)), W
-    elif "RBM" in name:
+    elif hasattr(model, "hnum"):  # rbm
         W = model.get_param("W")
         if include_gaps:
             return np.sqrt((W ** 2).sum(-1).sum(-1)), W
@@ -281,7 +281,7 @@ def all_weights(model, name=None, rows=5, order_weights=True):
     if name is None:
         name = model._get_name()
 
-    if "CRBM" in model_name or "crbm" in model_name:
+    if hasattr(model, "hidden_convolution_keys"): # CRBM of some sort
         if "cluster" in model_name:
             for cluster_indx in range(model.clusters):
                 for key in model.hidden_convolution_keys[cluster_indx]:
@@ -301,7 +301,7 @@ def all_weights(model, name=None, rows=5, order_weights=True):
                 else:
                     ncols = 1
                 conv_weights(model, key, name + "_" + key, rows, ncols, 7, 5, order_weights=order_weights)
-    elif "RBM" in model_name:
+    elif hasattr(model, "hnum"): #rbm
         beta, W = get_beta_and_W(model)
         if order_weights:
             order = np.argsort(beta)[::-1]
@@ -328,3 +328,33 @@ def conv_weights(crbm, hidden_key, name, rows, columns, h, w, order_weights=True
     fig = sequence_logo_all(W[order], data_type="weights", name=name + '.pdf', nrows=rows, ncols=columns, figsize=(h, w),
                             ticks_every=5, ticks_labels_size=10, title_size=12, dpi=200, alphabet=crbm.alphabet)
     plt.close()
+
+
+def cluster_report(model, name=None, rows=5, order_weights=True):
+    model_name = model._get_name()
+    if name is None:
+        name = model._get_name()
+
+    if hasattr(model, "hidden_convolution_keys"): # CRBM of some sort
+        if "cluster" in model_name:
+            for cluster_indx in range(model.clusters):
+                for key in model.hidden_convolution_keys[cluster_indx]:
+                    wdim = model.convolution_topology[cluster_indx][key]["weight_dims"]
+                    kernelx = wdim[2]
+                    if kernelx <= 10:
+                        ncols = 2
+                    else:
+                        ncols = 1
+                    conv_weights(model, key, f"{name}_{key}" + key, rows, ncols, 7, 5, order_weights=order_weights)
+        else:
+            for key in model.hidden_convolution_keys:
+                wdim = model.convolution_topology[key]["weight_dims"]
+                kernelx = wdim[2]
+                if kernelx <= 10:
+                    ncols = 2
+                else:
+                    ncols = 1
+                conv_weights(model, key, name + "_" + key, rows, ncols, 7, 5, order_weights=order_weights)
+
+
+    plt.close()  # close all open figures

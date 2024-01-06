@@ -2,13 +2,14 @@ from pool.utils.model_utils import get_beta_and_W
 from pool.utils.alphabet import get_alphabet
 from pool.utils.io import fasta_read
 from pool.utils.graph_utils import sequence_logo_multiple, sequence_logo, sequence_logo_all
+from pool.utils.seq_utils import dataframe_to_matrix
 
 import pandas as pd
 from glob import glob
 import seaborn as sns
 import matplotlib.pyplot as plt
 import json
-import subprocess as sp
+import os
 import numpy as np
 import torch
 import matplotlib.image as mpimg
@@ -52,8 +53,9 @@ def fetch_data(fasta_names, directory="./", assignment_function=None, threads=1,
         contains data from provided fasta files with columns "sequence", "round", "assignment", and "copy_num"
     """
     for xid, x in enumerate(fasta_names):
-        seqs, counts, all_chars, q_data = fasta_read(directory + x + ".fasta", alphabet, drop_duplicates=drop_duplicates, threads=threads)
-        round_label = [x for i in range(len(seqs))]
+        fasta_file = os.path.join(directory, f"{x}.fasta")
+        seqs, counts, all_chars, q_data = fasta_read(fasta_file, alphabet, drop_duplicates=drop_duplicates, threads=threads)
+        round_label = [x for _ in range(len(seqs))]
         if assignment_function is not None:
             assignment = [assignment_function(i) for i in counts]
         else:
@@ -93,18 +95,18 @@ def get_checkpoint_path(model_name, version=None, model_dir="./"):
     version_dir: str,
         tensorboard directory of target pytorch model
     """
-    ndir = model_dir + model_name + "/"
+    ndir = os.path.join(model_dir, model_name)
     if version:
-        version_dir = ndir + f"version_{version}/"
+        version_dir = os.path.join(ndir, f"version_{version}")
     else:   # Get Most recent i.e. highest version number
-        v_dirs = glob(ndir + "/*/", recursive=True)
+        v_dirs = glob(os.path.join(ndir, "*"), recursive=True)
         versions = [int(x[:-1].rsplit("_")[-1]) for x in v_dirs]  # extracted version numbers
 
         maxv = max(versions)  # get highest version number
         indexofinterest = versions.index(maxv)  # Get index of the highest version
         version_dir = v_dirs[indexofinterest]  # Access directory path of the highest version
 
-    y = glob(version_dir + "checkpoints/*.ckpt", recursive=False)[0]
+    y = glob(os.path.join(version_dir, "checkpoints", "*.ckpt"), recursive=False)[0]
     return y, version_dir
 
 
@@ -165,7 +167,7 @@ def generate_likelihoods(model, all_data, identifier, key="round", out_dir="./",
     #     data = {'likelihoods': likelihoods, "sequences": sequences, "labels": labels}
     # else:
     data = {'likelihoods': likelihoods, "sequences": sequences}
-    out = open(out_dir+identifier+".json", "w")
+    out = open(os.path.join(out_dir, identifier+".json"), "w")
     json.dump(data, out)
     out.close()
 
@@ -295,23 +297,27 @@ def data_subset(data_df, likelihood_dict, target, lmin, lmax):
     seqs, counts, ls = zip(*[(all_seqs[xid], all_counts[xid], x) for xid, x in enumerate(likelihood) if lmin < x < lmax])
     return pd.DataFrame({"sequence": seqs, "copy_num": counts, "likelihood": ls})
 
+#### Remove dependency for kplogo
+# def seq_logo(dataframe, output_file, weight=False, outdir="", alphabet='dna', key='sequence'):
+#     """Returns path to generated seq logo png file from external Kplogo program"""
+#     alphabet = "".join(list(get_alphabet(alphabet)))
+#     out = outdir + output_file
+#     df = dataframe[[key, "copy_num"]]
+#     if df.empty:
+#         print("No sequences found in provided dataframe")
+#         exit(-1)
+#     else:
+#         df.to_csv('tmp.csv', sep='\t', index=False, header=False)
+#         if weight:
+#             sp.check_call(f"/home/jonah/kpLogo/bin/kpLogo tmp.csv -simple -o {out} -alphabet {alphabet.keys()} -fontsize 20 -seq 1 -weight 2", shell=True)
+#         else:
+#             sp.check_call(f"/home/jonah/kpLogo/bin/kpLogo tmp.csv -simple -o {out} -alphabet {alphabet.keys()} -fontsize 20 -seq 1", shell=True)
+#         sp.check_call("rm tmp.csv", shell=True)
+#         return out
 
-def seq_logo(dataframe, output_file, weight=False, outdir=""):
-    """Returns path to generated seq logo png file from external Kplogo program"""
-    out = outdir + output_file
-    df = dataframe[["sequence", "copy_num"]]
-    if df.empty:
-        print("No sequences found in provided dataframe")
-        exit(-1)
-    else:
-        df.to_csv('tmp.csv', sep='\t', index=False, header=False)
-        if weight:
-            sp.check_call(f"/home/jonah/kpLogo/bin/kpLogo tmp.csv -simple -o {out} -alphabet ACDEFGHIKLMNPQRSTVWYU- -fontsize 20 -seq 1 -weight 2", shell=True)
-        else:
-            sp.check_call(f"/home/jonah/kpLogo/bin/kpLogo tmp.csv -simple -o {out} -alphabet ACDEFGHIKLMNPQRSTVWYU- -fontsize 20 -seq 1", shell=True)
-        sp.check_call("rm tmp.csv", shell=True)
-        return out
-
+def seq_logo(dataframe, alphabet='dna', key='sequence', ax=None):
+    matrix = dataframe_to_matrix(dataframe, alphabet=alphabet, key=key)
+    sequence_logo(matrix, alphabet=alphabet, ax=ax)
 
 def view_weights(rbm, type="top", selected=None, alphabet="protein", title=None, view="full", remove_gaps=False):
     beta, W = get_beta_and_W(rbm)
@@ -345,11 +351,10 @@ def view_weights(rbm, type="top", selected=None, alphabet="protein", title=None,
     fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, alphabet=alphabet)
 
 
-def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="protein", title=None, view="full", ax=None):
+def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, alphabet="protein", title=None, view="full"):
     beta, W = get_beta_and_W(crbm, hidden_key=hidden_key)
     order = np.argsort(beta)[::-1]
     assert sort in ["top", "unordered"]
-    assert molecule in ["protein", "dna", "rna"]
     if sort == "top":
         W = W[order]
         if isinstance(selected, int):
@@ -372,7 +377,7 @@ def view_weights_crbm(crbm, hidden_key, sort="top", selected=None, molecule="pro
         selected_weights = np.minimum(selected_weights, 0.)
 
     # Assume we want weights
-    fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, molecule=molecule)
+    fig = sequence_logo_multiple(selected_weights, data_type="weights", title=title, ncols=1, alphabet=alphabet)
 
 
 def dataframe_to_input(dataframe, base_to_id, v_num, weights=False):
@@ -723,7 +728,7 @@ class Motif_Finder():
 def parse_tb_files_crbm(model_str, model_dir="./", version=None):
     """parses the log directory of a given model, and optionally version. Extracts data to a pandas dataframe for
     easy graphing of our model"""
-    checkp, version_dir = get_checkpoint_path(model_str, rbmdir=model_dir, version=version)
+    checkp, version_dir = get_checkpoint_path(model_str, model_dir=model_dir, version=version)
 
     # Read in all scalar event files and extract info
     scalars = ["Weight Reg", "Field Reg", "Distance Reg", "CD_Loss", "Loss", "Train Free Energy"]

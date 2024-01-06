@@ -19,7 +19,7 @@ class PoolCRBMRelu(BaseRelu):
     def __init__(self, config, debug=False):
         super().__init__(config, debug=debug)
 
-        mandatory_keys = ['mc_moves', 'sample_type', "l1_2", "lf", "ld", "lgap", "lcorr", "lkd", "convolution_topology"]
+        mandatory_keys = ['mc_moves', 'sample_type', "l1_2", "lf", "ld", "lgap", "lcov", "ls", "convolution_topology"]
 
         for key in mandatory_keys:
             setattr(self, key, config[key])
@@ -30,8 +30,8 @@ class PoolCRBMRelu(BaseRelu):
         assert type(self.lf) is float or type(self.lf) is int
         assert type(self.ld) is float or type(self.ld) is int
         assert type(self.lgap) is float or type(self.lgap) is int
-        assert type(self.lcorr) is float or type(self.lcorr) is int
-        assert type(self.lkd) is float or type(self.lkd) is int
+        assert type(self.lcov) is float or type(self.lcov) is int
+        assert type(self.ls) is float or type(self.ls) is int
         assert type(self.convolution_topology) is dict
 
         # Set visible biases
@@ -65,8 +65,8 @@ class PoolCRBMRelu(BaseRelu):
             self.register_parameter(f"{key}_theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device)))
             self.register_parameter(f"{key}_gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device)))
             # Used in PT Sampling / AIS
-            self.register_parameter(f"{key}_0theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device), requires_grad=True))
-            self.register_parameter(f"{key}_0gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=True))
+            self.register_parameter(f"{key}_0theta", nn.Parameter(torch.zeros(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
+            self.register_parameter(f"{key}_0gamma", nn.Parameter(torch.ones(self.convolution_topology[key]["number"], device=self.device), requires_grad=False))
 
         # Saves Our hyperparameter options into the checkpoint file generated for Each Run of the Model
         # i.e. Simplifies loading a model that has already been run
@@ -76,6 +76,11 @@ class PoolCRBMRelu(BaseRelu):
         self.data_sampler = DataSampler(self)
         self.log_Z_AIS = None
         self.log_Z_AIS_std = None
+
+        # Empty function, useful for inherited classes
+        self.training_callback = lambda *args: None
+        self.validation_callback = lambda *args: None
+
 
         # Set training Function
         if self.sample_type == "gibbs":
@@ -123,16 +128,12 @@ class PoolCRBMRelu(BaseRelu):
         conv = self.compute_output_v(v)
         E = torch.zeros((len(self.hidden_convolution_keys), conv[0].shape[0]), device=self.device)
         for iid, i in enumerate(self.hidden_convolution_keys):
+            h_uk = h[iid]
             if hidden_sub_index != -1:
-                h_uk = h[iid][hidden_sub_index]
-            else:
-                h_uk = h[iid]
+                h_uk = h_uk[hidden_sub_index]
             E[iid] = h_uk.mul(conv[iid]).sum(1)
 
-        if E.shape[0] > 1:
-            return E.sum(0)
-        else:
-            return E.squeeze(0)
+        return E.sum(0)
 
     def transform_v(self, I):
         return F.one_hot(torch.argmax(I + getattr(self, "fields").unsqueeze(0), dim=-1), self.q)
@@ -178,10 +179,8 @@ class PoolCRBMRelu(BaseRelu):
 
             E[iid] = (con.square() * gamma).sum(-1) / 2 + (con * theta).sum(-1)
 
-        if E.shape[0] > 1:
-            return E.sum(0)
-        else:
-            return E.squeeze(0)
+        return E.sum(0)
+
 
     def random_init_config_v(self, custom_size=False, zeros=False):
         """Random Config of Visible Potts States"""
@@ -209,7 +208,8 @@ class PoolCRBMRelu(BaseRelu):
             if zeros:
                 config.append(torch.zeros(size, device=self.device))
             else:
-                config.append(torch.randn(size, device=self.device))
+                config.append(self.sample_from_inputs_h(
+                    [torch.zeros(size, device=self.device).flatten(0, -2)], beta=0)[0].reshape(size))
 
         return config
 
@@ -279,11 +279,7 @@ class PoolCRBMRelu(BaseRelu):
                             padding=self.convolution_topology[i]["padding"],
                             dilation=self.convolution_topology[i]["dilation"]).squeeze(3)
 
-            max_pool, max_inds = self.pools[iid](conv.abs())
-
-            flat_conv = conv.flatten(start_dim=2)
-            max_conv_values = flat_conv.gather(2, index=max_inds.flatten(start_dim=2)).view_as(max_inds)
-            max_pool *= max_conv_values/max_conv_values.abs()
+            max_pool, max_inds = self.pools[iid](conv)
 
             self.max_inds.append(max_inds)
             out = max_pool.flatten(start_dim=2)
@@ -377,6 +373,7 @@ class PoolCRBMRelu(BaseRelu):
             getattr(self, f"{key}_W").data.clamp_(-1.0, 1.0)
 
     def validation_step(self, batch, batch_idx):
+        self.validation_callback()
         inds, seqs, one_hot, seq_weights = batch
 
         free_energy = self.free_energy(one_hot)
@@ -392,12 +389,14 @@ class PoolCRBMRelu(BaseRelu):
         return
 
     def regularization_terms(self, distance_threshold=0.4):
+        # regularizer on visible biases
         freg = self.lf / (2 * np.prod(self.v_num) * self.q) * getattr(self, "fields").square().sum((0, 1))
+        # promotes sparsity on convolutional weights
         wreg = torch.zeros((1,), device=self.device)
-        dreg = torch.zeros((1,), device=self.device)  # discourages weights that are alike
-
-        bs_loss = torch.zeros((1,), device=self.device)  # encourages weights to use both positive and negative contributions
-        gap_loss = torch.zeros((1,), device=self.device)  # discourages high values for gaps
+        # discourages weights that are alike
+        dreg = torch.zeros((1,), device=self.device)
+        # discourages learning gaps
+        gap_loss = torch.zeros((1,), device=self.device)
 
         for iid, i in enumerate(self.hidden_convolution_keys):
             W_shape = self.convolution_topology[i]["weight_dims"]  # (h_num,  input_channels, kernel0, kernel1)
@@ -407,10 +406,8 @@ class PoolCRBMRelu(BaseRelu):
             wreg += x.sum() * self.l1_2 / (W_shape[0] * W_shape[1] * W_shape[2] * W_shape[3])
             gap_loss += self.lgap * W[:, :, :, -1].abs().mean()
 
-            Wpos = torch.clamp(W, min=0.)
-
-            ws = Wpos.squeeze(1)
-
+            # below is for distance reg
+            ws = W.squeeze(1)
             with torch.no_grad():
                 # compute positional differences for all pairs of weights
                 pdiff = (ws.unsqueeze(0).unsqueeze(2) - ws.unsqueeze(1).unsqueeze(3)).sum(4)
@@ -418,7 +415,16 @@ class PoolCRBMRelu(BaseRelu):
                 # concatenate it to itself to make full diagonals
                 wdm = torch.concat([pdiff, pdiff.clone()], dim=2)
 
-                # get stride to get matrix of all diagonals on separate row
+                # get stride to get matrix of all diagonals on separate rows
+                #        xx xy xz xx xy xz
+                #        yx yy yz yx yy yz
+                #        zx zy zz zx zy zz
+
+                # strided becomes
+                # xx yy zz
+                # xy yz zx
+                # xz yx zy
+
                 si, sj, v2, v = wdm.size()
                 i_s, j_s, v2_s, v_s = wdm.stride()
                 wdm_s = torch.as_strided(wdm, (si, sj, v, v), (i_s, j_s, v2_s, v2_s + 1))
@@ -460,12 +466,12 @@ class PoolCRBMRelu(BaseRelu):
             "weight_reg": wreg.detach(),
             "distance_reg": dreg.detach(),
             "gap_reg": gap_loss.detach(),
-            "both_side_reg": bs_loss.detach()
         }
 
-        return freg, wreg, dreg, bs_loss, gap_loss, reg_dict
+        return freg, wreg, dreg, gap_loss, reg_dict
 
     def training_step_PT_free_energy(self, batch, batch_idx):
+        self.training_callback()
         inds, seqs, one_hot, seq_weights = batch
 
         V_neg_oh, h_neg, V_pos_oh, h_pos = self(one_hot)
@@ -476,15 +482,15 @@ class PoolCRBMRelu(BaseRelu):
         cd_loss = F_v - F_vp
 
         # Regularization Terms
-        freg, wreg, dreg, bs_loss, gap_loss, reg_dict = self.regularization_terms()
+        regs = self.regularization_terms()
 
         # Calc loss
-        loss = cd_loss + freg + wreg + dreg + bs_loss + gap_loss
+        loss = cd_loss + sum(regs[:-1])
 
         logs = {"loss": loss,
                 "free_energy_diff": cd_loss.detach(),
                 "train_free_energy": F_v.detach(),
-                **reg_dict
+                **regs[-1]
                 }
 
         self.log("ptl/train_free_energy", logs["train_free_energy"], on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -494,10 +500,11 @@ class PoolCRBMRelu(BaseRelu):
         return logs["loss"]
 
     def training_step_CD_free_energy(self, batch, batch_idx):
+        self.training_callback()
         inds, seqs, one_hot, seq_weights = batch
 
-        V_neg_oh, h_neg, V_pos_oh, h_pos = self(one_hot)
-        F_v = (self.free_energy(V_pos_oh) * seq_weights / seq_weights.sum())  # free energy of training data
+        V_neg_oh, h_neg = self(one_hot)
+        F_v = (self.free_energy(one_hot) * seq_weights / seq_weights.sum())  # free energy of training data
         F_vp = (self.free_energy(V_neg_oh) * seq_weights / seq_weights.sum()) # free energy of gibbs sampled visible states
         cd_loss = (F_v - F_vp).mean()
 
@@ -509,15 +516,15 @@ class PoolCRBMRelu(BaseRelu):
         }
 
         # Regularization Terms
-        freg, wreg, dreg, bs_loss, gap_loss, reg_dict = self.regularization_terms()
+        regs = self.regularization_terms()
 
-        # Calculate Loss
-        loss = cd_loss + freg + wreg + dreg + bs_loss + gap_loss
+        # Calc loss
+        loss = cd_loss + sum(regs[:-1])
 
         logs = {"loss": loss,
                 "train_free_energy": cd_loss.sum().detach(),
                 **free_energy_log,
-                **reg_dict
+                **regs[-1]
                 }
 
         self.log("ptl/train_free_energy", logs["train_free_energy"], on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -527,6 +534,7 @@ class PoolCRBMRelu(BaseRelu):
         return logs["loss"]
 
     def training_step_PCD_free_energy(self, batch, batch_idx):
+        self.training_callback()
         inds, seqs, one_hot, seq_weights = batch
 
         if self.current_epoch == 0 and batch_idx == 0:
@@ -535,24 +543,27 @@ class PoolCRBMRelu(BaseRelu):
         if self.current_epoch == 0:
             self.chain[inds] = one_hot.type(torch.get_default_dtype())
 
-        V_oh_neg, h_neg = self.forward_PCD(inds)
+        with torch.no_grad():
+            V_oh_neg, h_neg = self.forward_PCD(inds)
 
-        inputs_flat = torch.concat(self.compute_output_v(one_hot), 1)
-
-        ### Normal Wayss
+        ### Normal Way
         F_v = self.free_energy(one_hot)
         F_vp = self.free_energy(V_oh_neg)
 
-        kld_loss = self.kurtosis(F_v).clamp(min=0) * self.lkd
-        cov_loss = (torch.cov(inputs_flat.T).triu().abs().sum())/((inputs_flat.shape[1]*(inputs_flat.shape[1]+1))/2) * self.lcorr
+        # standard deviation of free energy
+        std_loss = self.std(F_v).clamp(min=0) * self.ls
 
+        # covariance loss on hidden unit input
+        inputs_flat = torch.concat(self.compute_output_v(one_hot), 1)
+        cov_loss = (torch.cov(inputs_flat.T).triu().abs().sum())/((inputs_flat.shape[1]*(inputs_flat.shape[1]+1))/2) * self.lcov
+
+        # contrastive divergence
         cd_loss = (F_v - F_vp).mean()
 
         # Regularization Terms
-        freg, wreg, dreg, bs_loss, gap_loss, reg_dict = self.regularization_terms()
+        regs = self.regularization_terms()
 
-        # Calculate Loss
-        loss = cd_loss + freg + wreg + dreg + bs_loss + gap_loss + kld_loss + cov_loss
+        loss = cd_loss + sum(regs[:-1]) + std_loss + cov_loss
 
         if loss.isnan():
             print("okay")
@@ -561,35 +572,33 @@ class PoolCRBMRelu(BaseRelu):
                 "free_energy_diff": cd_loss.detach(),
                 "free_energy_pos": F_v.mean().detach(),
                 "free_energy_neg": F_vp.mean().detach(),
-                "kl_loss": kld_loss.detach(),
+                "std_loss": std_loss.detach(),
                 "cov_loss": cov_loss.detach(),
-                #  "input_correlation_reg": input_loss.detach(),
-                **reg_dict
+                **regs[-1]
                 }
 
+        # logging
         self.log("ptl/free_energy_diff", logs["free_energy_diff"], on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=one_hot.shape[0])
         self.log("ptl/train_free_energy", logs["free_energy_pos"], on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=one_hot.shape[0])
         self.log("ptl/train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=one_hot.shape[0])
-
         self.training_data_logs.append(logs)
         return logs["loss"]
 
-    def kurtosis(self, x):
-        mean = torch.mean(x)
-        diffs = (x - mean) + 1e-12
+    def std(self, x):
+        # mean = torch.mean(x)
+        # diffs = (x - mean) + 1e-12
         std = torch.std(x) + 1e-12
-        zscores = diffs/std
-        skew = torch.mean(torch.pow(zscores, 3.0), 0)
-        kurtosis = torch.mean(torch.pow(zscores, 4.0), 0)
-        dm = diffs.max()
+        # zscores = diffs/std
+        # skew = torch.mean(torch.pow(zscores, 3.0), 0)
+        # kurtosis = torch.mean(torch.pow(zscores, 4.0), 0)
+        # dm = diffs.max()
         # bimodality = (skew.square() + 1) / kurtosis
-        return (std-2)  # + ((dm.abs()-5)/5).clamp(min=0) #(std-4).clamp(min=0) + skew.abs()*3 (kurtosis - 2).clamp(min=0)*3
+        return (std-3).clamp(min=0)  # + ((dm.abs()-5)/5).clamp(min=0) #(std-4).clamp(min=0) + skew.abs()*3 (kurtosis - 2).clamp(min=0)*3
 
     def forward_PCD(self, inds):
         """Gibbs sampling with Persistent Contrastive Divergence"""
         # Last sample that was saved to self.chain variable, initialized in training step
         fantasy_v = self.chain[inds]
-        h_pos = self.sample_from_inputs_h(self.compute_output_v(fantasy_v))
         for _ in range(self.mc_moves - 1):
             fantasy_v, fantasy_h = self.markov_step(fantasy_v)
 
@@ -601,32 +610,29 @@ class PoolCRBMRelu(BaseRelu):
         return V_neg, h_neg
 
     def forward_PT(self, V_pos_ohe, N_PT):
-        # Initialize_PT is called before the forward function is called. Therefore, N_PT will be filled
         # Parallel Tempering
         n_chains = V_pos_ohe.shape[0]
 
-        with torch.no_grad():
-            fantasy_v = self.random_init_config_v(custom_size=(N_PT, n_chains))
-            fantasy_h = self.random_init_config_h(custom_size=(N_PT, n_chains))
-            fantasy_E = self.energy_PT(fantasy_v, fantasy_h, N_PT)
-
-            for _ in range(self.mc_moves - 1):
-                fantasy_v, fantasy_h, fantasy_E = self.data_sampler.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E, N_PT)
-                self.data_sampler.update_betas(N_PT)
+        fantasy_v = self.random_init_config_v(custom_size=(N_PT, n_chains))
+        fantasy_h = self.random_init_config_h(custom_size=(N_PT, n_chains))
+        fantasy_E = self.energy_PT(fantasy_v, fantasy_h, N_PT)
 
         fantasy_v, fantasy_h, fantasy_E = self.data_sampler.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E, N_PT)
         self.data_sampler.update_betas(N_PT)
 
-        # V_neg, h_neg, V_pos, h_pos
-        return fantasy_v[0], fantasy_h[0], V_pos_ohe, self.sample_from_inputs_h(self.compute_output_v(V_pos_ohe))
+        for _ in range(self.mc_moves - 1):
+            fantasy_v, fantasy_h, fantasy_E = self.data_sampler.markov_PT_and_exchange(fantasy_v, fantasy_h, fantasy_E, N_PT)
+            self.data_sampler.update_betas(N_PT)
+
+        return fantasy_v[0], fantasy_h[0]
 
     def forward(self, V_pos_ohe):
         # Gibbs sampling
-        fantasy_v, first_h = self.markov_step(V_pos_ohe)
+        fantasy_v, fantasy_h = self.markov_step(V_pos_ohe)
         for _ in range(self.mc_moves - 1):
             fantasy_v, fantasy_h = self.markov_step(fantasy_v)
 
-        return fantasy_v, fantasy_h, V_pos_ohe, first_h
+        return fantasy_v, fantasy_h
 
     # X must be a pandas dataframe with the sequences in string format under the column 'sequence'
     # Returns the likelihood for each sequence in an array
@@ -710,8 +716,102 @@ class PoolCRBMRelu(BaseRelu):
 
         gamma = beta * getattr(self, f'{hidden_key}_gamma') + (1 - beta) * getattr(self, f'{hidden_key}_0gamma')
         theta = beta * getattr(self, f'{hidden_key}_theta') + (1 - beta) * getattr(self, f'{hidden_key}_0theta')
+        I *= beta
 
         sqrt_gamma = torch.sqrt(gamma).expand(B, -1)
         log_gamma = torch.log(gamma).expand(B, -1)
-        out = self.log_erf_times_gauss((-I + theta) / sqrt_gamma) - 0.5 * log_gamma
-        return out
+        return self.log_erf_times_gauss((-I + theta) / sqrt_gamma) - 0.5 * log_gamma
+
+
+class PCRSpecificity(PoolCRBMRelu):
+    def __init__(self, config, debug=False):
+        super().__init__(config, debug=debug)
+        # specificity fraction
+        mandatory_keys = ['sfrac', 'exps']
+        for key in mandatory_keys:
+            setattr(self, key, config[key])
+
+        assert type(self.sfrac) is float and self.sfrac <= 1.
+        assert type(self.exps) is float
+
+        # sets our cutoffs prior to each training iteration
+        self.input_filters = None
+        self.input_cutoffs = []
+        # self.training_callback = self.set_cutoffs
+        # self.validation_callback = self.set_cutoffs
+
+        self.save_hyperparameters()
+
+
+    def set_cutoffs(self):
+        self.input_cutoffs = []
+        with torch.no_grad():
+            for kid, key in enumerate(self.hidden_convolution_keys):
+                ws = getattr(self, f"{key}_W").squeeze(1)
+                in_max_val_pos = ws.clamp(min=0.).sum(2).sum(1)
+                # in_max_val_pos, _ = ws.clamp(min=0.).max(2)
+                # in_max_val_pos = in_max_val_pos.sum(1)
+                new_cutoff = in_max_val_pos*self.sfrac
+                # new_cutoff = in_max_val_pos*(self.sfrac*min(self.current_epoch /
+                #                                          (self.epochs*self.sfrac_milestone), 1.))
+                self.input_cutoffs.append(new_cutoff)
+
+    def compute_output_v(self, X):
+        """Compute Input for Hidden Layer from Visible Potts, Uses one hot vector"""
+        self.set_cutoffs()  # sets cutoffs based off current weights
+        outputs = []
+        self.max_inds = []
+        self.min_inds = []
+        self.input_filters = []
+        self.hidden_cutoffs = []
+        for iid, i in enumerate(self.hidden_convolution_keys):
+            weights = getattr(self, f"{i}_W")
+            conv = F.conv2d(X.unsqueeze(1).type(torch.get_default_dtype()), weights, stride=self.convolution_topology[i]["stride"],
+                            padding=self.convolution_topology[i]["padding"],
+                            dilation=self.convolution_topology[i]["dilation"]).squeeze(3)
+
+            max_pool, max_inds = self.pools[iid](conv)
+
+            self.max_inds.append(max_inds)
+            out = max_pool.flatten(start_dim=2)
+            out.squeeze_(2)
+
+            # self.input_filters.append(out < self.input_cutoffs[iid])
+            # out[self.input_filters[-1]] /= self.input_cutoffs[iid]
+            out = torch.pow((out/self.input_cutoffs[iid]).clamp(min=0.), self.exps)
+            self.hidden_cutoffs.append(out.detach().clone())
+            # out[self.input_filters[-1]] = 0.
+
+            if self.dr > 0.:
+                out = F.dropout(out, p=self.dr, training=self.training)
+
+            outputs.append(out)
+            if True in torch.isnan(out):
+                print("Nan in hidden unit input")
+
+        return outputs
+
+    def compute_output_h(self, h):  # from h_uk (B, hidden_num)
+        """Compute Input for Visible Layer from Hidden dReLU"""
+        outputs = []
+        for iid, i in enumerate(self.hidden_convolution_keys):
+            # h[iid][self.input_filters[iid]] = 0.
+            h[iid] = h[iid] * self.hidden_cutoffs[iid]
+
+            reconst = self.unpools[iid](h[iid].view_as(self.max_inds[iid]), self.max_inds[iid])
+
+            if reconst.ndim == 3:
+                reconst.unsqueeze_(3)
+
+            output = F.conv_transpose2d(reconst, getattr(self, f"{i}_W"),
+                                              stride=self.convolution_topology[i]["stride"],
+                                              padding=self.convolution_topology[i]["padding"],
+                                              dilation=self.convolution_topology[i]["dilation"],
+                                              output_padding=self.convolution_topology[i]["output_padding"]).squeeze(1)
+
+            outputs.append(output)
+
+        if len(outputs) > 1:
+            return torch.sum(torch.stack(outputs), 0)
+
+        return outputs[0]

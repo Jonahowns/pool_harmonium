@@ -12,7 +12,7 @@ class DataSampler:
         self.model = pool_crbm
         self.device = torch.device('cpu')
 
-        self.record_acceptance = False
+        self.record_acceptance = True
         self.record_swaps = False
 
         self.count_swaps = 0
@@ -25,6 +25,8 @@ class DataSampler:
 
         self.update_betas_lr = 0.025
         self.update_betas_lr_decay = 0.99
+
+        self.mavar_gamma = 0.95
 
         for k, v in kwargs:
             setattr(self, k, v)
@@ -43,9 +45,8 @@ class DataSampler:
     def update_betas(self, N_PT, beta=1):
         with torch.no_grad():
             if self.acceptance_rates.mean() > 0:
-                stiffness = torch.maximum(1 - (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()),
-                                               torch.zeros_like(self.mav_acceptance_rates, device=self.device)) \
-                                          + 1e-4 * torch.ones(N_PT - 1, device=self.device)
+                stiffness = (self.mav_acceptance_rates / self.mav_acceptance_rates.mean()).clamp(min=0) + \
+                            1e-4 * torch.ones(N_PT - 1, device=self.device)
                 diag = stiffness[0:-1] + stiffness[1:]
                 offdiag_g = -stiffness[1:-1]
                 offdiag_d = -stiffness[1:-1]
@@ -65,34 +66,57 @@ class DataSampler:
         if self.record_swaps:
             particle_id = torch.arange(N_PT).unsqueeze(1).expand(N_PT, v.shape[1])
 
-        betadiff = self.betas[1:] - self.betas[:-1]
-        for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
-            proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i], device=self.device))
-            swap = torch.rand(proba.shape[0], device=self.device) < proba
-            if i > 0:
-                v[i:i + 2, swap] = torch.flip(v[i - 1: i + 1], [0])[:, swap]
-                for hid in range(self.model.h_layer_num):
-                    h[hid][i:i + 2, swap] = torch.flip(h[hid][i - 1: i + 1], [0])[:, swap]
+        permutation = self.get_permutation(N_PT, self.count_swaps)
+        F = self.betas[:, None] * e
+        F_swapped = self.betas[permutation, None] * e
 
-                e[i:i + 2, swap] = torch.flip(e[i - 1: i + 1], [0])[:, swap]
-                if self.record_swaps:
-                    particle_id[i:i + 2, swap] = torch.flip(particle_id[i - 1: i + 1], [0])[:, swap]
-            else:
-                v[i:i + 2, swap] = torch.flip(v[:i + 1], [0])[:, swap]
-                for hid in range(self.model.h_layer_num):
-                    h[hid][i:i + 2, swap] = torch.flip(h[hid][:i + 1], [0])[:, swap]
-                e[i:i + 2, swap] = torch.flip(e[:i + 1], [0])[:, swap]
-                if self.record_swaps:
-                    particle_id[i:i + 2, swap] = torch.flip(particle_id[:i + 1], [0])[:, swap]
+        for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
+            log_proba = (F[i] + F[i+1] - F_swapped[i] - F_swapped[i+1]).clamp(min=0)
+            swap = torch.rand(*log_proba.shape, device=self.device) < log_proba.exp()
+
+            v[i:i + 2][:, swap] = v[permutation[i:i+2]][:, swap]
+            for hid in range(self.model.h_layer_num):
+                h[hid][i:i + 2][:, swap] = h[hid][permutation[i:i+2]][:, swap]
+            e[i:i + 2][:, swap] = e[permutation[i:i + 2]][:, swap]
+
+            if self.record_swaps:
+                particle_id[i:i + 2][:, swap] = particle_id[permutation[i:i + 2]][:, swap]
 
             if self.record_acceptance:
-                self.acceptance_rates[i] = swap.type(torch.get_default_dtype()).mean()
-                self.mav_acceptance_rates[i] = self.mavar_gamma * self.mav_acceptance_rates[i] + self.acceptance_rates[
-                    i] * (1 - self.mavar_gamma)
+                self.acceptance_rates[i] = log_proba.exp().mean()
+                self.log_acceptance_rates[i] = log_proba.mean().exp()
+                self.mav_acceptance_rates[i] = self.mavar_gamma * self.mav_acceptance_rates[i] + \
+                                               self.acceptance_rates[i] * (1 - self.mavar_gamma)
+                self.mav_log_acceptance_rates[i] = (self.mavar_gamma * self.mav_log_acceptance_rates[i].log() +
+                                                    self.log_acceptance_rates[i].log() * (1 - self.mavar_gamma)).exp()
+
+        # betadiff = self.betas[1:] - self.betas[:-1]
+        # for i in np.arange(self.count_swaps % 2, N_PT - 1, 2):
+        #     proba = torch.exp(betadiff[i] * e[i + 1] - e[i]).minimum(torch.ones_like(e[i], device=self.device))
+        #     swap = torch.rand(proba.shape[0], device=self.device) < proba
+        #     if i > 0:
+        #         v[i:i + 2, swap] = torch.flip(v[i - 1: i + 1], [0])[:, swap]
+        #         for hid in range(self.model.h_layer_num):
+        #             h[hid][i:i + 2, swap] = torch.flip(h[hid][i - 1: i + 1], [0])[:, swap]
+        #
+        #         e[i:i + 2, swap] = torch.flip(e[i - 1: i + 1], [0])[:, swap]
+        #         if self.record_swaps:
+        #             particle_id[i:i + 2, swap] = torch.flip(particle_id[i - 1: i + 1], [0])[:, swap]
+        #     else:
+        #         v[i:i + 2, swap] = torch.flip(v[:i + 1], [0])[:, swap]
+        #         for hid in range(self.model.h_layer_num):
+        #             h[hid][i:i + 2, swap] = torch.flip(h[hid][:i + 1], [0])[:, swap]
+        #         e[i:i + 2, swap] = torch.flip(e[:i + 1], [0])[:, swap]
+        #         if self.record_swaps:
+        #             particle_id[i:i + 2, swap] = torch.flip(particle_id[:i + 1], [0])[:, swap]
+        #
+        #     if self.record_acceptance:
+        #         self.acceptance_rates[i] = swap.type(torch.get_default_dtype()).mean()
+        #         self.mav_acceptance_rates[i] = self.mavar_gamma * self.mav_acceptance_rates[i] + self.acceptance_rates[
+        #             i] * (1 - self.mavar_gamma)
 
         if self.record_swaps:
             self.particle_id.append(particle_id)
-
         self.count_swaps += 1
         return v, h, e
 
@@ -103,9 +127,9 @@ class DataSampler:
             elif beta_type == 'root':
                 betas = torch.sqrt(torch.arange(n_betas, device=self.device)) / (n_betas-1)
             elif beta_type == 'adaptive':
-                Nthermalize = 500
-                Nchains = 50
-                N_PT = 20
+                Nthermalize = 1000
+                Nchains = 20
+                N_PT = 11
                 # adaptive_PT_lr = 0.05
                 # adaptive_PT_decay = True
                 # adaptive_PT_lr_decay = 10 ** (-1 / float(Nthermalize))
@@ -121,23 +145,23 @@ class DataSampler:
                     betas += list(
                         sparse_betas[i] + (sparse_betas[i + 1] - sparse_betas[i]) *
                         torch.arange(n_betas / (N_PT - 1),  device=self.device) /
-                        (n_betas / (N_PT - 1) - 1))
+                        float(n_betas / (N_PT - 1) - 1))
                 betas = torch.tensor(betas, device=self.device)
                 n_betas = betas.shape[0]
 
             # Initialization.
+
             log_weights = torch.zeros(M, device=self.device)
             # config = self.gen_data(Nchains=M, Lchains=1, Nthermalize=0, beta=0)
-
-            config = [self.model.sample_from_inputs_v(self.model.random_init_config_v(custom_size=(M,))),
-                      self.model.sample_from_inputs_h(self.model.random_init_config_h(custom_size=(M,)))]
 
             log_Z_init = torch.zeros(1, device=self.device)
             log_Z_init += self.model.logpartition_h(self.model.random_init_config_h(custom_size=(1,), zeros=True), beta=0)
             log_Z_init += self.model.logpartition_v(self.model.random_init_config_v(custom_size=(1,), zeros=True), beta=0)
-
             if verbose:
                 print(f'Initial evaluation: log(Z) = {log_Z_init.data}')
+
+            config = [self.model.sample_from_inputs_v(self.model.random_init_config_v(custom_size=(M,))),
+                      self.model.sample_from_inputs_h(self.model.random_init_config_h(custom_size=(M,)))]
 
             for i in range(1, n_betas):
                 if verbose:
@@ -150,11 +174,34 @@ class DataSampler:
                 energy = self.model.energy(config[0], config[1], beta=betas[i])
                 log_weights += -(betas[i] - betas[i - 1]) * energy
 
+                # if verbose:
+                #     if (i % 1 == 0):
+                #         print(f'Iteration {i}, beta: {betas[i]}')
+                #         print(f'h {config[1]}')
+                #         print(f'Energy {energy}')
+                #         print(f'Energy v {self.model.energy_v(config[0], beta=betas[i])}')
+                #         print(f'Energy h {self.model.energy_h(config[1], beta=betas[i])}')
+                #         print(f'dirty bis {self.model.bidirectional_weight_term(config[0], config[1])}')
+                #         print(f'Logpartition h {self.model.logpartition_h(self.model.compute_output_v(config[0]), beta=betas[i])}')
+                #         print(f'Free Energy {self.model.free_energy(config[0], beta=betas[i])}')
+
             log_Z_AIS = (log_Z_init + log_weights).mean()
             log_Z_AIS_std = (log_Z_init + log_weights).std() / np.sqrt(M)
             if verbose:
                 print('Final evaluation: log(Z)= %s +- %s' % (log_Z_AIS, log_Z_AIS_std))
             return log_Z_AIS, log_Z_AIS_std
+
+    def get_permutation(self, N_PT, count):
+        permutation = torch.arange(N_PT, device=self.device)
+        if (N_PT % 2 == 0) & (count % 2 == 0):
+            permutation -= 2 * (permutation % 2) - 1
+        elif (N_PT % 2 == 0) & (count % 2 == 1):
+            permutation[1:-1] += 2 * (permutation[1:-1] % 2) - 1
+        elif (N_PT % 2 == 1) & (count % 2 == 0):
+            permutation[:-1] -= 2 * (permutation[:-1] % 2) - 1
+        else:
+            permutation[1:] += 2 * (permutation[1:] % 2) - 1
+        return permutation
 
     def _gen_data(self, Nthermalize, Ndata, Nstep, N_PT=1, batches=1, reshape=True,
                    config_init=[], beta=1, record_replica=False, update_betas=False):
@@ -168,14 +215,15 @@ class DataSampler:
 
             self.acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
             self.mav_acceptance_rates = torch.zeros(N_PT - 1, device=self.device)
-
+            self.log_acceptance_rates = torch.ones(N_PT - 1, device=self.device)
+            self.mav_log_acceptance_rates = torch.ones(N_PT - 1, device=self.device)
             self.count_swaps = 0
 
             if self.record_swaps:
                 self.particle_id = [torch.arange(N_PT, device=self.device)[:, None].repeat(batches, dim=1)]
 
-            Ndata /= batches
-            Ndata = int(Ndata)
+            Ndata = Ndata // batches
+            # Ndata = int(Ndata)
 
             if config_init != []:
                 config = config_init
@@ -570,7 +618,7 @@ if __name__ == '__main__':
         data_keys = [train_fastas.split(".")[0]]
 
     # Get's checkpoint and directory for latest version of the trained model
-    checkp, version_dir = am.get_checkpoint_path(rounds[0], model_dir=mdir)  # , version=25)
+    checkp, version_dir = am.get_checkpoint_path(rounds[0], model_dir=mdir, version=10)
 
     # load crbm
     # ncrbm = DualCRBMRelu.load_from_checkpoint(checkp)
